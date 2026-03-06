@@ -30,20 +30,24 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # STATE
 # -------------------------
 chat_memory = deque(maxlen=50)
+
 cooldown = 8
 last_response_time = 0
 
+# prevents duplicate replies
+processed_messages = set()
+
 
 # -------------------------
-# MESSAGE CLASSIFIER
+# CLASSIFIER
 # -------------------------
 def classify_message(text):
 
     prompt = f"""
 Classify this Discord message.
 
-ATTACK = bullying, insults
-DISTRESS = emotional frustration
+ATTACK = bullying
+DISTRESS = emotional stress
 NORMAL = everything else
 
 Return ONE word.
@@ -84,11 +88,10 @@ User {name} was talking trash.
 
 Call them out.
 
-Rules:
+Rules
 - witty
 - blunt
-- 1-2 sentences
-- short
+- 1 sentence
 
 Message:
 {message}
@@ -98,26 +101,21 @@ Message:
         model="llama-3.3-70b-versatile",
         messages=[{"role":"user","content":prompt}],
         temperature=0.9,
-        max_tokens=80
+        max_tokens=60
     )
 
     return r.choices[0].message.content.strip()
 
 
 # -------------------------
-# DISTRESS SUPPORT
+# DISTRESS RESPONSE
 # -------------------------
 def generate_support(name,msg):
 
     prompt=f"""
-User {name} sounds stressed.
+User {name} seems stressed.
 
-Reply briefly.
-
-Rules
-- supportive
-- casual
-- 1 sentence
+Reply with one supportive sentence.
 
 Message:
 {msg}
@@ -134,28 +132,28 @@ Message:
 
 
 # -------------------------
-# PSYCHOLOGICAL EVAL
+# PSYCH EVAL
 # -------------------------
 def generate_eval(name,recent,older):
 
-    recent_text="\n".join(recent)
-    older_text="\n".join(older)
+    r_text="\n".join(recent)
+    o_text="\n".join(older)
 
     prompt=f"""
 Provide a short psychological observation.
 
-Rules:
+Rules
 - 2 sentences
-- observational
+- observational only
 - no speculation
 
 User: {name}
 
-Recent messages:
-{recent_text}
+Recent:
+{r_text}
 
-Older messages:
-{older_text}
+Older:
+{o_text}
 """
 
     r=groq_client.chat.completions.create(
@@ -177,7 +175,7 @@ async def on_ready():
 
 
 # -------------------------
-# MAIN MESSAGE HANDLER
+# MESSAGE HANDLER
 # -------------------------
 @bot.event
 async def on_message(message):
@@ -187,7 +185,12 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    responded = False
+    # HARD DUPLICATE PREVENTION
+    if message.id in processed_messages:
+        return
+
+    processed_messages.add(message.id)
+
     text = message.content.strip()
 
     chat_memory.append(f"{message.author.display_name}: {text}")
@@ -199,31 +202,31 @@ async def on_message(message):
         return
 
     # -------------------------
-    # BOT MENTION COMMANDS
+    # MENTION COMMANDS
     # -------------------------
-    if bot.user in message.mentions and not responded:
+    if bot.user in message.mentions:
 
-        targets = [m for m in message.mentions if m != bot.user]
+        targets=[m for m in message.mentions if m!=bot.user]
 
         if targets:
 
-            target = targets[0]
+            target=targets[0]
 
-            # ROAST REQUEST
+            # ROAST
             if "roast" in text.lower():
 
-                roast = generate_roast(target.display_name,text)
+                roast=generate_roast(target.display_name,text)
 
                 await message.reply(
                     f"{target.mention} {roast}"
                 )
 
-                responded=True
                 last_response_time=now
+                return
 
 
-            # EVALUATE REQUEST
-            elif "eval" in text.lower() or "evaluate" in text.lower():
+            # EVALUATE
+            if "eval" in text.lower() or "evaluate" in text.lower():
 
                 recent=[]
                 older=[]
@@ -247,37 +250,36 @@ async def on_message(message):
                     f"Psych eval for {target.mention}:\n{result}"
                 )
 
-                responded=True
                 last_response_time=now
+                return
 
     # -------------------------
     # AUTO MODERATION
     # -------------------------
-    if not responded:
+    category=classify_message(text)
 
-        category = classify_message(text)
+    if category=="ATTACK":
 
-        if category=="ATTACK":
+        roast=generate_roast(message.author.display_name,text)
 
-            roast = generate_roast(message.author.display_name,text)
+        await message.reply(
+            f"{message.author.mention} {roast}"
+        )
 
-            await message.reply(
-                f"{message.author.mention} {roast}"
-            )
+        last_response_time=now
+        return
 
-            responded=True
-            last_response_time=now
 
-        elif category=="DISTRESS":
+    if category=="DISTRESS":
 
-            support=generate_support(message.author.display_name,text)
+        support=generate_support(message.author.display_name,text)
 
-            await message.reply(
-                f"{message.author.mention} {support}"
-            )
+        await message.reply(
+            f"{message.author.mention} {support}"
+        )
 
-            responded=True
-            last_response_time=now
+        last_response_time=now
+        return
 
     await bot.process_commands(message)
 
@@ -289,12 +291,7 @@ async def on_message(message):
 async def selfdestruct(ctx):
 
     prompt=f"""
-Roast {ctx.author.display_name}.
-
-Rules
-- funny
-- harmless
-- one sentence
+Roast {ctx.author.display_name} in one funny sentence.
 """
 
     r=groq_client.chat.completions.create(
