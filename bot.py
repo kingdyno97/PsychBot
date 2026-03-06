@@ -27,7 +27,10 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 # Discord setup
 # ───────────────────────────────────────
 intents = discord.Intents.default()
-intents.message_content = True
+if hasattr(intents, "message_content"):
+    intents.message_content = True
+if hasattr(intents, "members"):
+    intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -70,7 +73,7 @@ for _model in raw_model_candidates:
 active_model: Optional[str] = None
 groq_error_count = 0
 last_groq_error = ""
-SCRIPT_VERSION = "psychbot-2026-03-06-r5"
+SCRIPT_VERSION = "psychbot-2026-03-06-r6"
 
 EVAL_TERMS = ["evaluate", "eval", "analyze", "analyse", "diagnose", "diagnosis", "psychoanalyze", "psychoanalyse"]
 ROAST_TERMS = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him", "destroy her", "destroy them"]
@@ -148,6 +151,10 @@ def channel_memory_for(channel_id: int) -> Deque[Tuple[str, str]]:
     return bot_memory[channel_id]
 
 
+def display_name(user) -> str:
+    return getattr(user, "display_name", getattr(user, "name", "user"))
+
+
 def contains_any(text_lower: str, phrases: List[str]) -> bool:
     return any(p in text_lower for p in phrases)
 
@@ -198,13 +205,13 @@ def is_emoji_only_distress(text: str) -> bool:
 def is_reply_to_bot(message: discord.Message) -> bool:
     if bot.user is None or not message.reference:
         return False
-    resolved = message.reference.resolved
+    resolved = getattr(message.reference, "resolved", None)
     if isinstance(resolved, discord.Message):
         return resolved.author.id == bot.user.id
     return False
 
 
-def get_target_from_mentions(message: discord.Message) -> discord.abc.User:
+def get_target_from_mentions(message: discord.Message):
     if bot.user is None:
         return message.author
     targets = [m for m in message.mentions if m.id != bot.user.id]
@@ -452,7 +459,7 @@ User message:
 Recent messages from referenced user:
 {recent_text}
 
-Older messages from referenced user:
+Older messages:
 {older_text}
 """
     try:
@@ -603,8 +610,8 @@ async def send_response(channel, target, text: str) -> None:
 
 async def handle_evaluate_like_request(
     channel,
-    requester: discord.abc.User,
-    target: discord.abc.User,
+    requester,
+    target,
     request_text: str,
 ) -> str:
     recent, older = await collect_target_messages(channel, target.id)
@@ -612,8 +619,8 @@ async def handle_evaluate_like_request(
     profile = user_profiles.get(target.id, "No profile yet.")
     return await generate_psychoanalysis(
         request_text=request_text,
-        target_name=target.display_name,
-        requester_name=requester.display_name,
+        target_name=display_name(target),
+        requester_name=display_name(requester),
         recent=recent,
         older=older,
         profile=profile,
@@ -622,8 +629,8 @@ async def handle_evaluate_like_request(
 
 async def handle_roast_request(
     channel,
-    requester: discord.abc.User,
-    target: discord.abc.User,
+    requester,
+    target,
     request_text: str,
 ) -> str:
     if requester.id == target.id:
@@ -635,8 +642,8 @@ async def handle_roast_request(
 
     return await generate_dual_roast(
         request_text=request_text,
-        target_name=target.display_name,
-        requester_name=requester.display_name,
+        target_name=display_name(target),
+        requester_name=display_name(requester),
         recent=recent,
         older=older,
         profile=profile,
@@ -661,7 +668,7 @@ async def health(ctx):
     err = last_groq_error if last_groq_error else "none"
     await ctx.send(
         f"version={SCRIPT_VERSION} model={model} groq_errors={groq_error_count} last_error={err}",
-        allowed_mentions=discord.AllowedMentions.none(),
+        allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
     )
 
 
@@ -682,131 +689,153 @@ async def roast_command(ctx, member: Optional[discord.Member] = None):
 
 
 @bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.MemberNotFound):
+        await ctx.send(
+            "I can’t find that user. Mention them directly like `!evaluate @user`.",
+            allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+        )
+        return
+    print("command error:", repr(error))
+
+
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    print(f"discord on_error in {event_method}")
+
+
+@bot.event
 async def on_message(message):
-    if message.author.bot:
-        return
+    try:
+        if message.author.bot:
+            return
 
-    # explicit prefix commands
-    if (message.content or "").startswith("!"):
-        await bot.process_commands(message)
-        return
+        # explicit prefix commands
+        if (message.content or "").startswith("!"):
+            await bot.process_commands(message)
+            return
 
-    if not remember_message_id(message.id):
-        return
+        if not remember_message_id(message.id):
+            return
 
-    original_text = (message.content or "")[:MAX_MESSAGE_CHARS]
-    if not original_text.strip():
-        await bot.process_commands(message)
-        return
+        original_text = (message.content or "")[:MAX_MESSAGE_CHARS]
+        if not original_text.strip():
+            await bot.process_commands(message)
+            return
 
-    text_lower = original_text.lower()
-    now = monotonic()
-    channel_id = message.channel.id
-    last_response_time = channel_last_response_time.get(channel_id, 0.0)
+        text_lower = original_text.lower()
+        now = monotonic()
+        channel_id = message.channel.id
+        last_response_time = channel_last_response_time.get(channel_id, 0.0)
 
-    channel_memory = channel_memory_for(channel_id)
-    channel_memory.append(("user", original_text))
+        channel_memory = channel_memory_for(channel_id)
+        channel_memory.append(("user", original_text))
 
-    # automatic hate speech callout
-    if likely_hate_speech(text_lower):
-        callout = await generate_hate_speech_callout(original_text, message.author.display_name)
-        await send_response(message.channel, message.author, callout)
-        channel_last_response_time[channel_id] = now
-        await bot.process_commands(message)
-        return
+        # automatic hate speech callout
+        if likely_hate_speech(text_lower):
+            callout = await generate_hate_speech_callout(original_text, display_name(message.author))
+            await send_response(message.channel, message.author, callout)
+            channel_last_response_time[channel_id] = now
+            await bot.process_commands(message)
+            return
 
-    # defensive mode
-    criticism_triggers = ["ai slop", "ai garbage", "bad bot", "dumb bot", "stupid bot"]
-    if any(trigger in text_lower for trigger in criticism_triggers):
-        short_responses = [
-            "Me? Slop? Bold claim from a human.",
-            "Careful, your opinion just got roasted instead.",
-            "Wow, coming for a bot? Courageous.",
-            "And here I thought humans were funny.",
-        ]
-        await send_response(message.channel, message.author, random.choice(short_responses))
-        await bot.process_commands(message)
-        return
-
-    if "how is" in text_lower and ("humor" in text_lower or "humour" in text_lower):
-        await send_response(
-            message.channel,
-            message.author,
-            "Humor is confidence plus absurdity. You analyzed it so hard you became the punchline.",
-        )
-        await bot.process_commands(message)
-        return
-
-    addressed = (bot.user in message.mentions) or ("psychbot" in text_lower) or is_reply_to_bot(message)
-
-    # natural-language command handling
-    if addressed and contains_any(text_lower, EVAL_TERMS):
-        target = get_target_from_mentions(message)
-        response = await handle_evaluate_like_request(message.channel, message.author, target, original_text)
-        await send_response(message.channel, target, response)
-        channel_last_response_time[channel_id] = now
-        await bot.process_commands(message)
-        return
-
-    if addressed and contains_any(text_lower, ROAST_TERMS + KITCHEN_TERMS):
-        target = get_target_from_mentions(message)
-        response = await handle_roast_request(message.channel, message.author, target, original_text)
-        await send_response(message.channel, target, response)
-        channel_last_response_time[channel_id] = now
-        await bot.process_commands(message)
-        return
-
-    # normal open chat with bot
-    if addressed:
-        target = get_target_from_mentions(message)
-        recent, older = await collect_target_messages(message.channel, target.id)
-        profile = user_profiles.get(target.id, "No profile yet.")
-        asyncio.create_task(refresh_profile_background(message.channel, target.id))
-
-        reply = await generate_free_reply(
-            message_text=original_text,
-            memory=channel_memory,
-            target_recent=recent,
-            target_older=older,
-            profile=profile,
-            requester_name=message.author.display_name,
-            roast_target_name=None,
-            avoid_children=True,
-        )
-        await send_response(message.channel, target, reply)
-        channel_last_response_time[channel_id] = now
-        await bot.process_commands(message)
-        return
-
-    # automatic distress / attack responses (lightweight and throttled)
-    if now - last_response_time < cooldown_seconds:
-        await bot.process_commands(message)
-        return
-
-    if is_emoji_only_distress(original_text):
-        category = "NORMAL"
-    elif likely_emotional_content(text_lower):
-        category = await classify_message(original_text)
-    else:
-        category = "NORMAL"
-
-    if category == "ATTACK":
-        quick_roast = random.choice(
-            [
-                "That message was loud, not smart.",
-                "Big confidence, tiny emotional regulation.",
-                "You typed rage and called it personality.",
+        # defensive mode
+        criticism_triggers = ["ai slop", "ai garbage", "bad bot", "dumb bot", "stupid bot"]
+        if any(trigger in text_lower for trigger in criticism_triggers):
+            short_responses = [
+                "Me? Slop? Bold claim from a human.",
+                "Careful, your opinion just got roasted instead.",
+                "Wow, coming for a bot? Courageous.",
+                "And here I thought humans were funny.",
             ]
-        )
-        await send_response(message.channel, message.author, quick_roast)
-        channel_last_response_time[channel_id] = now
+            await send_response(message.channel, message.author, random.choice(short_responses))
+            await bot.process_commands(message)
+            return
 
-    elif category == "DISTRESS":
-        support = await generate_support(original_text)
-        await send_response(message.channel, message.author, support)
-        channel_last_response_time[channel_id] = now
+        if "how is" in text_lower and ("humor" in text_lower or "humour" in text_lower):
+            await send_response(
+                message.channel,
+                message.author,
+                "Humor is confidence plus absurdity. You analyzed it so hard you became the punchline.",
+            )
+            await bot.process_commands(message)
+            return
 
-    await bot.process_commands(message)
+        addressed = (bot.user in message.mentions) or ("psychbot" in text_lower) or is_reply_to_bot(message)
+
+        # natural-language command handling
+        if addressed and contains_any(text_lower, EVAL_TERMS):
+            target = get_target_from_mentions(message)
+            response = await handle_evaluate_like_request(message.channel, message.author, target, original_text)
+            await send_response(message.channel, target, response)
+            channel_last_response_time[channel_id] = now
+            await bot.process_commands(message)
+            return
+
+        if addressed and contains_any(text_lower, ROAST_TERMS + KITCHEN_TERMS):
+            target = get_target_from_mentions(message)
+            response = await handle_roast_request(message.channel, message.author, target, original_text)
+            await send_response(message.channel, target, response)
+            channel_last_response_time[channel_id] = now
+            await bot.process_commands(message)
+            return
+
+        # normal open chat with bot
+        if addressed:
+            target = get_target_from_mentions(message)
+            recent, older = await collect_target_messages(message.channel, target.id)
+            profile = user_profiles.get(target.id, "No profile yet.")
+            asyncio.create_task(refresh_profile_background(message.channel, target.id))
+
+            reply = await generate_free_reply(
+                message_text=original_text,
+                memory=channel_memory,
+                target_recent=recent,
+                target_older=older,
+                profile=profile,
+                requester_name=display_name(message.author),
+                roast_target_name=None,
+                avoid_children=True,
+            )
+            await send_response(message.channel, target, reply)
+            channel_last_response_time[channel_id] = now
+            await bot.process_commands(message)
+            return
+
+        # automatic distress / attack responses (lightweight and throttled)
+        if now - last_response_time < cooldown_seconds:
+            await bot.process_commands(message)
+            return
+
+        if is_emoji_only_distress(original_text):
+            category = "NORMAL"
+        elif likely_emotional_content(text_lower):
+            category = await classify_message(original_text)
+        else:
+            category = "NORMAL"
+
+        if category == "ATTACK":
+            quick_roast = random.choice(
+                [
+                    "That message was loud, not smart.",
+                    "Big confidence, tiny emotional regulation.",
+                    "You typed rage and called it personality.",
+                ]
+            )
+            await send_response(message.channel, message.author, quick_roast)
+            channel_last_response_time[channel_id] = now
+
+        elif category == "DISTRESS":
+            support = await generate_support(original_text)
+            await send_response(message.channel, message.author, support)
+            channel_last_response_time[channel_id] = now
+
+        await bot.process_commands(message)
+    except Exception as exc:
+        print("on_message fatal error:", repr(exc))
+        await bot.process_commands(message)
 
 
 # ───────────────────────────────────────
