@@ -15,7 +15,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not DISCORD_TOKEN or not GROQ_API_KEY:
-    print("Missing DISCORD_TOKEN or GROQ_API_KEY")
+    print("Missing DISCORD_TOKEN or GROQ_API_KEY in environment variables")
     exit(1)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -59,7 +59,7 @@ Message:
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role":"user","content":prompt}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=5
         )
@@ -69,7 +69,8 @@ Message:
         if "DISTRESS" in result:
             return "DISTRESS"
         return "NORMAL"
-    except:
+    except Exception as e:
+        print(f"Classification error: {e}")
         return "NORMAL"
 
 def generate_roast():
@@ -82,13 +83,17 @@ Rules
 - confident
 - DO NOT include any names
 """
-    r = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.9,
-        max_tokens=60
-    )
-    return clean_ai_output(r.choices[0].message.content)
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,
+            max_tokens=60
+        )
+        return clean_ai_output(r.choices[0].message.content)
+    except Exception as e:
+        print(f"Roast generation error: {e}")
+        return "Couldn't generate a roast right now."
 
 def generate_support():
     prompt = """
@@ -97,13 +102,17 @@ Someone seems stressed.
 Respond with one supportive sentence.
 Do not include names.
 """
-    r = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.7,
-        max_tokens=60
-    )
-    return clean_ai_output(r.choices[0].message.content)
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=60
+        )
+        return clean_ai_output(r.choices[0].message.content)
+    except Exception as e:
+        print(f"Support generation error: {e}")
+        return "Hey, take a breath — you're not alone."
 
 def generate_eval(recent, older):
     r_text = "\n".join(recent)
@@ -122,19 +131,26 @@ Recent:
 Older:
 {o_text}
 """
-    r = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.7,
-        max_tokens=120
-    )
-    return clean_ai_output(r.choices[0].message.content)
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=120
+        )
+        return clean_ai_output(r.choices[0].message.content)
+    except Exception as e:
+        print(f"Eval generation error: {e}")
+        return "Not enough data to evaluate."
 
 async def send_response(channel, target, text):
-    await channel.send(f"{target.mention} {text}")
+    try:
+        await channel.send(f"{target.mention} {text}")
+    except Exception as e:
+        print(f"Send response error: {e}")
 
 # ───────────────────────────────────────
-# Events (AFTER bot is defined!)
+# Events
 # ───────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -155,19 +171,19 @@ async def on_message(message):
         text = message.content.lower()
         now = asyncio.get_event_loop().time()
 
+        # ───────────────────────────────────────
+        # Bot mentioned → diagnose/evaluate first
+        # ───────────────────────────────────────
         if bot.user in message.mentions:
             targets = [m for m in message.mentions if m.id != bot.user.id]
             if not targets:
                 return
             target = targets[0]
 
-            if "roast" in text:
-                roast = generate_roast()
-                await send_response(message.channel, target, roast)
-                last_response_time = now
-                return
+            content_lower = message.content.lower()
 
-            if "eval" in text or "evaluate" in text:
+            # Diagnose / evaluate keywords (priority)
+            if any(word in content_lower for word in ["diagnose", "evaluate", "eval", "psych", "analysis", "assess"]):
                 recent = []
                 older = []
                 async for msg in message.channel.history(limit=400):
@@ -178,15 +194,33 @@ async def on_message(message):
                             older.append(msg.content)
                         if len(recent) + len(older) >= 14:
                             break
+
+                if not recent and not older:
+                    await message.channel.send(f"{target.mention} No recent messages found to evaluate.")
+                    return
+
                 result = generate_eval(recent, older)
                 await send_response(message.channel, target, result)
                 last_response_time = now
+                return  # ← STOP here – no roast or other processing
+
+            # Roast only if no diagnose keyword matched
+            if "roast" in content_lower:
+                roast = generate_roast()
+                await send_response(message.channel, target, roast)
+                last_response_time = now
                 return
 
+        # ───────────────────────────────────────
+        # Cooldown for auto-responses only
+        # ───────────────────────────────────────
         if now - last_response_time < cooldown:
             await bot.process_commands(message)
             return
 
+        # ───────────────────────────────────────
+        # Auto detection (non-mentioned messages)
+        # ───────────────────────────────────────
         category = classify_message(text)
 
         if category == "ATTACK":
@@ -199,6 +233,7 @@ async def on_message(message):
             await send_response(message.channel, message.author, support)
             last_response_time = now
 
+        # Always process prefix commands (! commands) at the end
         await bot.process_commands(message)
 
 # ───────────────────────────────────────
