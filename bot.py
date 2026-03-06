@@ -1,3 +1,4 @@
+```python
 import os
 import discord
 import asyncio
@@ -34,8 +35,8 @@ processed_messages = set()
 cooldown = 8
 last_response_time = 0
 
-# Memory: last 10 bot replies in this channel (for callbacks)
-bot_memory = deque(maxlen=10)  # stores (channel_id, message_content) tuples
+# Memory: last 10 bot replies in this channel (for callbacks and continuity)
+bot_memory = {}  # channel_id -> deque of (message_id, content) tuples, maxlen=10
 
 # ───────────────────────────────────────
 # Helpers
@@ -109,13 +110,13 @@ Older:
     except:
         return None
 
-def generate_support(text):
+def generate_support(original_text):
     prompt = f"""
-Someone seems distressed (message: "{text}").
+Someone seems distressed (message: "{original_text}").
 
 Reply with one kind sentence that has dark, sarcastic humor but is still supportive.
 No names.
-Keep it light but real.
+Keep it light but real, infuse humor to lighten the mood without dismissing feelings.
 """
     try:
         r = groq_client.chat.completions.create(
@@ -159,23 +160,36 @@ Older:
     except:
         return "Insufficient data for meaningful evaluation."
 
-def generate_free_reply(question, memory_context):
-    memory_str = "\n".join(memory_context) if memory_context else "No prior bot replies in this channel."
+def generate_free_reply(original_message, memory_context, target_recent=None, target_older=None):
+    memory_str = "\n".join([content for _, content in memory_context]) if memory_context else "No prior bot replies in this channel."
+    
+    # Include target history if available (for continuity when elaborating on users)
+    target_recent_str = "\n".join(target_recent[-8:]) if target_recent else ""
+    target_older_str = "\n".join(target_older[:6]) if target_older else ""
 
     prompt = f"""
 You are PsychBot — edgy, sarcastic, psychologically sharp, darkly funny AI.
 
-The user just said: "{question}"
+The user just said: "{original_message}"
 
-Previous things you've said in this channel (reference if relevant):
+If the user is asking to elaborate on something (e.g., talk more about a previous idea like 'non-existent kitchen table'), reference your past statements and build on them cleverly.
+Enforce and expand on previous roasts/ideas if referenced (e.g., if they mention crying at non-existent table, double down humorously).
+
+Previous things you've said in this channel (reference if relevant for continuity):
 {memory_str}
+
+If elaborating on a specific user, their recent messages:
+{target_recent_str}
+
+Their older messages:
+{target_older_str}
 
 Reply naturally — answer questions, react to statements, be witty/sarcastic/insightful.
 Keep it entertaining, a bit mean if it fits, but never cruel for no reason.
-One short paragraph max unless it's deep.
+Use dark humor where appropriate.
+One short paragraph max unless it's deep or elaborating.
 No names unless directly addressing.
 """
-
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -194,7 +208,9 @@ async def send_response(channel, target, text):
     try:
         msg = await channel.send(f"{target.mention} {text}" if target else text)
         # Store bot's own reply in memory
-        bot_memory.append((channel.id, text))
+        if channel.id not in bot_memory:
+            bot_memory[channel.id] = deque(maxlen=10)
+        bot_memory[channel.id].append((msg.id, text))
         return msg
     except Exception as e:
         print(f"Send error: {e}")
@@ -218,20 +234,22 @@ async def on_message(message):
             return
         processed_messages.add(message.id)
 
-        text = message.content.lower()
+        original_text = message.content
+        text_lower = original_text.lower()
         now = asyncio.get_event_loop().time()
 
-        channel_memory = [m[1] for m in bot_memory if m[0] == message.channel.id]
+        channel_id = message.channel.id
+        if channel_id not in bot_memory:
+            bot_memory[channel_id] = deque(maxlen=10)
+        channel_memory = bot_memory[channel_id]
 
         # Bot mentioned → special commands first
         if bot.user in message.mentions:
             targets = [m for m in message.mentions if m.id != bot.user.id]
             target = targets[0] if targets else None
 
-            content_lower = message.content.lower()
-
             eval_keywords = ["diagnose", "evaluate", "eval", "psych", "analysis", "assess", "psychological"]
-            if any(kw in content_lower for kw in eval_keywords):
+            if any(kw in text_lower for kw in eval_keywords):
                 recent = []
                 older = []
                 async for msg in message.channel.history(limit=400):
@@ -248,7 +266,7 @@ async def on_message(message):
                 last_response_time = now
                 return
 
-            if "roast" in content_lower:
+            if "roast" in text_lower:
                 recent = []
                 older = []
                 async for msg in message.channel.history(limit=400):
@@ -266,18 +284,33 @@ async def on_message(message):
                 last_response_time = now
                 return
 
-            # Free-form reply if no command matched
-            reply = generate_free_reply(message.content, channel_memory)
+            # Free-form reply if no command matched (handles questions, statements, elaborations)
+            # Fetch target history if mentioning a target for better context
+            target_recent = None
+            target_older = None
+            if target:
+                target_recent = []
+                target_older = []
+                async for msg in message.channel.history(limit=400):
+                    if msg.author.id == target.id and msg.content.strip():
+                        if len(target_recent) < 8:
+                            target_recent.append(msg.content)
+                        elif len(target_older) < 6:
+                            target_older.append(msg.content)
+                        if len(target_recent) + len(target_older) >= 14:
+                            break
+
+            reply = generate_free_reply(original_message, channel_memory, target_recent, target_older)
             await send_response(message.channel, target or message.author, reply)
             last_response_time = now
             return
 
-        # Auto-detection – ONLY blatant ATTACK
+        # Auto-detection – ONLY blatant ATTACK or DISTRESS
         if now - last_response_time < cooldown:
             await bot.process_commands(message)
             return
 
-        category = classify_message(text)
+        category = classify_message(original_text)  # Use original for better classification
 
         if category == "ATTACK":
             recent = []
@@ -297,7 +330,7 @@ async def on_message(message):
             last_response_time = now
 
         elif category == "DISTRESS":
-            support = generate_support()
+            support = generate_support(original_text)  # Pass original for context
             if support:
                 await send_response(message.channel, message.author, support)
             last_response_time = now
@@ -308,3 +341,4 @@ async def on_message(message):
 # Run
 # ───────────────────────────────────────
 bot.run(DISCORD_TOKEN)
+```
