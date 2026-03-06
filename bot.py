@@ -1,6 +1,7 @@
 import os
 import discord
 import asyncio
+from collections import deque
 from discord.ext import commands
 from dotenv import load_dotenv
 from groq import Groq
@@ -26,7 +27,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ───────────────────────────────────────
-# Globals (only what's actually used)
+# Globals (minimal – only what's used)
 # ───────────────────────────────────────
 processing_lock = asyncio.Lock()
 processed_messages = set()
@@ -43,20 +44,29 @@ def clean_ai_output(text):
 
 def classify_message(text):
     prompt = f"""
-Classify this Discord message as one word only:
+You are a precise Discord message classifier. Analyze tone, intent, and context carefully.
 
-ATTACK = bullying / insult / aggression
-DISTRESS = emotional distress / suicidal hints / despair
-NORMAL = everything else
+Return ONLY one of these words:
+
+ATTACK = clear bullying, insult, aggression, or hostile attack directed at a person
+DISTRESS = emotional distress, suicidal hints, despair, or cry for help
+NORMAL = everything else, including:
+  - Playful teasing, sarcasm, jokes, compliments
+  - Messages about the bot itself (e.g. "bot is glitching", "bot is dead af", "this bot is extra")
+  - Light-hearted banter, memes, or non-hostile humor
+
+Be strict: only classify as ATTACK if it's genuinely mean/hostile toward someone.
+If it's about the bot, joking, or ambiguous, ALWAYS return NORMAL.
 
 Message:
 {text}
 """
+
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
+            temperature=0.1,  # low for consistency / fewer false positives
             max_tokens=5
         )
         result = r.choices[0].message.content.upper().strip()
@@ -67,7 +77,7 @@ Message:
         return "NORMAL"
     except Exception as e:
         print(f"Classification error: {e}")
-        return "NORMAL"
+        return "NORMAL"  # safe fallback
 
 def generate_roast(target_recent, target_older):
     recent = "\n".join(target_recent[-8:]) if target_recent else "No recent messages."
@@ -265,7 +275,6 @@ async def on_message(message):
         category = classify_message(text)
 
         if category == "ATTACK":
-            # For attacks, try to use attacker history if available
             recent = []
             older = []
             async for msg in message.channel.history(limit=400):
