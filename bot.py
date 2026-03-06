@@ -99,12 +99,9 @@ async def update_user_profile(channel, user_id):
     if profile:
         user_profiles[user_id] = profile
 
-# ───────────── AI Reply ─────────────
+# ───────────── AI Free-form Reply ─────────────
 def generate_free_reply(message_text, memory, target_recent, target_older, profile,
                         requester_name=None, roast_target_name=None, long_reply=False):
-    """
-    Simplified prompt for reliability. Includes fallback.
-    """
     memory_text = "\n".join([f"{role}: {content}" for role, content in memory])
     recent_text = "\n".join(target_recent[-5:]) if target_recent else ""
     older_text = "\n".join(target_older[:5]) if target_older else ""
@@ -152,9 +149,9 @@ Write one short paragraph response.
     except:
         # Fallback witty response if Groq fails
         fallback_roasts = [
-            f"Oops, my brain short-circuited, but I still think {roast_target_name or 'someone'} could use a roast.",
-            "I tried to roast but my circuits are fried. Guess you're lucky this time.",
-            "AI malfunction prevented a roast. Pretend I just nailed it."
+            f"Oops, my circuits shorted, but I still think {roast_target_name or 'someone'} could use a roast.",
+            "I tried to roast but my brain fried. Pretend I just nailed it.",
+            "AI malfunction prevented a roast. You’re lucky this time."
         ]
         return random.choice(fallback_roasts)
 
