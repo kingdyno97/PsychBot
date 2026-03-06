@@ -32,8 +32,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Globals
 # ───────────────────────────────────────
 processed_messages = deque(maxlen=5000)
-cooldown = 8
-last_response_time = 0
 bot_memory = {}  # channel_id -> deque of (role, content)
 user_profiles = {}  # user_id -> profile
 PROGRAMMER_NAME = "Austin"
@@ -99,81 +97,59 @@ async def update_user_profile(channel, user_id):
     if profile:
         user_profiles[user_id] = profile
 
-# ───────────── AI Free-form Reply ─────────────
-def generate_free_reply(message_text, memory, target_recent, target_older, profile,
-                        requester_name=None, roast_target_name=None, long_reply=False):
-    memory_text = "\n".join([f"{role}: {content}" for role, content in memory])
-    recent_text = "\n".join(target_recent[-5:]) if target_recent else ""
-    older_text = "\n".join(target_older[:5]) if target_older else ""
+# ───────────── AI Responses ─────────────
+async def generate_ai_reply(message_text, channel_memory, target_user=None,
+                            requester_name=None, long_reply=False):
+    """Decide which type of reply to generate"""
+    roast_target_name = target_user.display_name if target_user else None
+    profile = "No profile yet."
+    if target_user:
+        await update_user_profile(message.channel, target_user.id)
+        profile = user_profiles.get(target_user.id, profile)
 
-    roast_instructions = ""
+    memory_text = "\n".join([f"{role}: {content}" for role, content in channel_memory])
+    prompt_parts = []
+
+    # Roast / analyze / profile triggers
     if roast_target_name and requester_name and long_reply:
-        roast_instructions = f"""
-Roast {roast_target_name} directly, then {requester_name} for asking a bot to roast.
-Keep it short, witty, safe, no IDs, no literal child locations.
-"""
+        prompt_parts.append(
+            f"Roast {roast_target_name} directly, then {requester_name} for asking a bot to roast. "
+            f"Keep it short, witty, safe, no IDs, no child locations."
+        )
 
     prompt = f"""
-You are PsychBot.
-Personality: witty, sarcastic, psychologically observant, dark humor.
-Rules:
-- Always respond from the bot, never speak for others
-- Avoid therapy language
-- Treat programmer {PROGRAMMER_NAME} as normal
-Special roast behavior:
-{roast_instructions}
-Conversation history:
-{memory_text}
-User profile:
-{profile}
-User message:
-{message_text}
-Recent messages from target:
-{recent_text}
-Older messages:
-{older_text}
+You are PsychBot, witty, sarcastic, psychologically observant, dark humor.
+Rules: respond from the bot, never speak for others, avoid therapy language.
+Programmer {PROGRAMMER_NAME} is normal.
+Conversation history: {memory_text}
+User profile: {profile}
+User message: {message_text}
 Write one short paragraph response.
+{''.join(prompt_parts)}
 """
 
-    try:
-        r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.9,
-            max_tokens=100 if long_reply else 60
-        )
-        result = clean_ai_output(r.choices[0].message.content)
-        if not result:
-            raise Exception("Empty response")
-        return result
-    except:
-        # Fallback witty response if Groq fails
-        fallback_roasts = [
-            f"Oops, my circuits shorted, but I still think {roast_target_name or 'someone'} could use a roast.",
-            "I tried to roast but my brain fried. Pretend I just nailed it.",
-            "AI malfunction prevented a roast. You’re lucky this time."
-        ]
-        return random.choice(fallback_roasts)
+    for attempt in range(2):
+        try:
+            r = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.9,
+                max_tokens=100 if long_reply else 60
+            )
+            result = clean_ai_output(r.choices[0].message.content)
+            if result:
+                return result
+        except:
+            continue
 
-# ───────────── Fact Answer ─────────────
-def generate_fact_answer(message_text):
-    prompt = f"""
-Answer concisely. Then add: 'But I'm not here to diagnose anyone.'
-Question:
-{message_text}
-"""
-    try:
-        r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=80
-        )
-        return clean_ai_output(r.choices[0].message.content)
-    except:
-        return "I don't know, but I'm not here to diagnose anyone."
+    # Fallback last resort
+    fallback_roasts = [
+        f"Oops, I tried roasting {roast_target_name or 'someone'} but circuits fried.",
+        "AI malfunction prevented a roast. You're lucky this time.",
+        "Pretend I nailed the roast. Really, I did."
+    ]
+    return random.choice(fallback_roasts)
 
-# ───────────── Supportive Replies ─────────────
 def generate_support(text):
     prompt = f"""
 Someone posted this:
@@ -192,7 +168,23 @@ Keep it short, do NOT sound like a therapist.
     except:
         return "Rough day? At least Discord is cheaper than therapy."
 
-# ───────────── Send Response ─────────────
+def generate_fact_answer(message_text):
+    prompt = f"""
+Answer concisely. Then add: 'But I'm not here to diagnose anyone.'
+Question:
+{message_text}
+"""
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80
+        )
+        return clean_ai_output(r.choices[0].message.content)
+    except:
+        return "I don't know, but I'm not here to diagnose anyone."
+
 async def send_response(channel, target, text):
     if not text:
         text = "My brain just blue-screened."
@@ -208,22 +200,19 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    global last_response_time
     if message.author.bot or message.id in processed_messages:
         return
     processed_messages.append(message.id)
 
     original_text = message.content[:500]
     text_lower = original_text.lower()
-    now = asyncio.get_event_loop().time()
-
     channel_id = message.channel.id
     if channel_id not in bot_memory:
         bot_memory[channel_id] = deque(maxlen=20)
     bot_memory[channel_id].append(("user", original_text))
     channel_memory = bot_memory[channel_id]
 
-    # Criticism short reply
+    # Criticism triggers
     criticism_triggers = ["ai slop", "ai garbage", "bad bot", "dumb bot", "stupid bot"]
     if any(trigger in text_lower for trigger in criticism_triggers):
         responses = [
@@ -244,28 +233,16 @@ async def on_message(message):
         )
         return
 
-    # Roast / evaluate / analyze triggers
+    # Roast / analyze / profile / evaluate triggers
     special_keywords = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him",
                         "evaluate", "diagnose", "analyze", "profile"]
     if any(k in text_lower for k in special_keywords):
         targets = [m for m in message.mentions if m.id != bot.user.id]
-        target_name = targets[0].display_name if targets else "someone"
+        target_user = targets[0] if targets else None
         requester_name = message.author.display_name
-
-        if targets:
-            await update_user_profile(message.channel, targets[0].id)
-            profile = user_profiles.get(targets[0].id, "No profile yet.")
-        else:
-            profile = "No profile yet."
-
-        reply = generate_free_reply(
-            original_text,
-            channel_memory,
-            [], [],
-            profile,
-            requester_name=requester_name,
-            roast_target_name=target_name,
-            long_reply=True
+        reply = await generate_ai_reply(
+            original_text, channel_memory, target_user=target_user,
+            requester_name=requester_name, long_reply=True
         )
         await send_response(message.channel, message.author, reply)
         return
@@ -277,30 +254,23 @@ async def on_message(message):
         await send_response(message.channel, message.author, reply)
         return
 
-    # Short normal conversation replies
+    # Short normal conversation
     mentioned = bot.user in message.mentions or any(w in text_lower for w in ["psychbot", "bot"])
     if mentioned:
-        reply = generate_free_reply(
-            original_text,
-            channel_memory,
-            [], [],
-            profile="No profile yet.",
-            long_reply=False
+        reply = await generate_ai_reply(
+            original_text, channel_memory, long_reply=False
         )
         await send_response(message.channel, message.author, reply)
-        last_response_time = now
         return
 
-    # Emoji distress
+    # Distress
     emoji_only = all(c in "😭😢🥺😞😔😿 " for c in original_text)
     category = classify_message(original_text)
     if emoji_only:
         category = "NORMAL"
-
     if category == "DISTRESS":
         support = generate_support(original_text)
         await send_response(message.channel, message.author, support)
-        last_response_time = now
 
     await bot.process_commands(message)
 
