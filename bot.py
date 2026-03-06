@@ -1,7 +1,6 @@
 import os
 import discord
 import asyncio
-from collections import deque
 from discord.ext import commands
 from dotenv import load_dotenv
 from groq import Groq
@@ -15,7 +14,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not DISCORD_TOKEN or not GROQ_API_KEY:
-    print("Missing DISCORD_TOKEN or GROQ_API_KEY in environment variables")
+    print("Missing DISCORD_TOKEN or GROQ_API_KEY")
     exit(1)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -27,7 +26,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ───────────────────────────────────────
-# Globals (minimal – only what's used)
+# Globals
 # ───────────────────────────────────────
 processing_lock = asyncio.Lock()
 processed_messages = set()
@@ -44,19 +43,19 @@ def clean_ai_output(text):
 
 def classify_message(text):
     prompt = f"""
-You are a precise Discord message classifier. Analyze tone, intent, and context carefully.
+You are an extremely strict Discord message classifier.
 
-Return ONLY one of these words:
+Return ONLY one word:
 
-ATTACK = clear bullying, insult, aggression, or hostile attack directed at a person
-DISTRESS = emotional distress, suicidal hints, despair, or cry for help
-NORMAL = everything else, including:
-  - Playful teasing, sarcasm, jokes, compliments
-  - Messages about the bot itself (e.g. "bot is glitching", "bot is dead af", "this bot is extra")
-  - Light-hearted banter, memes, or non-hostile humor
+ATTACK = ONLY blatant, unambiguous bullying, slurs, direct insults, threats, or hostility clearly intended to harm someone.
+DISTRESS = clear emotional distress, suicidal hints, despair, or cry for help.
+NORMAL = EVERYTHING ELSE, including:
+  - Playful teasing, sarcasm, jokes, compliments, flirting ("sexy", "hot", etc.)
+  - Ambiguous statements that could be interpreted multiple ways
+  - Self-deprecation, memes, edgy humor without clear malice
+  - Messages that require context or "questioning" to see as negative
 
-Be strict: only classify as ATTACK if it's genuinely mean/hostile toward someone.
-If it's about the bot, joking, or ambiguous, ALWAYS return NORMAL.
+Be VERY conservative: if it's not 100% obviously hostile toward a person, ALWAYS return NORMAL.
 
 Message:
 {text}
@@ -66,7 +65,7 @@ Message:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,  # low for consistency / fewer false positives
+            temperature=0.1,  # very low → consistent & conservative
             max_tokens=5
         )
         result = r.choices[0].message.content.upper().strip()
@@ -77,7 +76,7 @@ Message:
         return "NORMAL"
     except Exception as e:
         print(f"Classification error: {e}")
-        return "NORMAL"  # safe fallback
+        return "NORMAL"  # safest fallback
 
 def generate_roast(target_recent, target_older):
     recent = "\n".join(target_recent[-8:]) if target_recent else "No recent messages."
@@ -86,14 +85,15 @@ def generate_roast(target_recent, target_older):
     prompt = f"""
 You are a brutally honest, psychologically incisive roaster.
 
-Analyze the target's message history below.
-Identify their core insecurities, contradictions, defense mechanisms, or repeating emotional patterns.
+Only trigger if the message is a clear attack. Otherwise do not respond.
+
+Analyze the target's history. Identify core insecurities, contradictions, defense mechanisms, repeating emotional patterns.
 Deliver ONE devastating, deeply personal sentence that cuts straight to that psychological wound.
 
 Rules:
-- Be surgical and insightful — go for the emotional/ego core
-- Do NOT make shallow roasts (hair, clothes, looks, skills)
-- Do NOT mention names
+- Surgical and insightful — emotional/ego core only
+- NO shallow roasts (hair, clothes, looks, skills)
+- NO names
 - One sentence only
 
 Recent messages:
@@ -113,7 +113,7 @@ Older messages (if any):
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
         print(f"Roast error: {e}")
-        return "Your whole persona is just a mask — and it's cracking."
+        return None  # return None to skip sending if generation fails
 
 def generate_support():
     prompt = """
@@ -133,7 +133,7 @@ Be calm and sincere.
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
         print(f"Support error: {e}")
-        return "You're allowed to feel this way — breathe, you're not alone."
+        return None
 
 def generate_eval(recent, older):
     r_text = "\n".join(recent[-8:]) if recent else ""
@@ -141,7 +141,7 @@ def generate_eval(recent, older):
 
     if len(recent) + len(older) < 3:
         fallback_prompt = """
-The target has very little message history in this channel.
+The target has very little message history.
 
 Give one neutral, observational sentence about someone who rarely speaks in group settings.
 Keep it psychological, not insulting.
@@ -188,6 +188,8 @@ Older:
         return "Insufficient message history for meaningful observation."
 
 async def send_response(channel, target, text):
+    if text is None:
+        return  # skip if generation failed
     try:
         await channel.send(f"{target.mention} {text}")
     except Exception as e:
@@ -215,7 +217,7 @@ async def on_message(message):
         text = message.content.lower()
         now = asyncio.get_event_loop().time()
 
-        # Bot is mentioned → handle special commands first
+        # Bot mentioned → special commands first
         if bot.user in message.mentions:
             targets = [m for m in message.mentions if m.id != bot.user.id]
             if not targets:
@@ -224,9 +226,7 @@ async def on_message(message):
 
             content_lower = message.content.lower()
 
-            # ──────────────────────────────
-            # Diagnose / evaluate priority – CHECK FIRST
-            # ──────────────────────────────
+            # Diagnose/evaluate priority
             eval_keywords = ["diagnose", "evaluate", "eval", "psych", "analysis", "assess", "psychological"]
             if any(kw in content_lower for kw in eval_keywords):
                 recent = []
@@ -243,11 +243,9 @@ async def on_message(message):
                 result = generate_eval(recent, older)
                 await send_response(message.channel, target, result)
                 last_response_time = now
-                return  # ← STOP – no roast, no auto-detection
+                return
 
-            # ──────────────────────────────
-            # Roast only if NO eval keyword present
-            # ──────────────────────────────
+            # Roast only if no eval keyword
             if "roast" in content_lower:
                 recent = []
                 older = []
@@ -265,9 +263,7 @@ async def on_message(message):
                 last_response_time = now
                 return
 
-        # ───────────────────────────────────────
-        # Auto-detection for non-mentioned messages
-        # ───────────────────────────────────────
+        # Auto-detection – only on clear ATTACK
         if now - last_response_time < cooldown:
             await bot.process_commands(message)
             return
@@ -295,10 +291,9 @@ async def on_message(message):
             await send_response(message.channel, message.author, support)
             last_response_time = now
 
-        # Always process prefix ! commands at the end
         await bot.process_commands(message)
 
 # ───────────────────────────────────────
-# Run bot
+# Run
 # ───────────────────────────────────────
 bot.run(DISCORD_TOKEN)
