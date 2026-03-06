@@ -46,7 +46,6 @@ def clean_ai_output(text):
     text = text.replace("<", "").replace(">", "")
     return text.strip()
 
-# Classify messages as ATTACK / DISTRESS / NORMAL
 def classify_message(text):
     prompt = f"""
 Return ONLY one word.
@@ -74,7 +73,6 @@ Message:
     except:
         return "NORMAL"
 
-# Generate psychological profile for a user
 def generate_user_profile(messages):
     history = "\n".join(messages[-30:])
     prompt = f"""
@@ -106,11 +104,28 @@ async def update_user_profile(channel, user_id):
     if profile:
         user_profiles[user_id] = profile
 
-# AI free-form reply
-def generate_free_reply(message_text, memory, target_recent, target_older, profile):
+# ───────────── AI Free-form Reply ─────────────
+def generate_free_reply(message_text, memory, target_recent, target_older, profile,
+                        requester_name=None, roast_target_name=None, avoid_children=True):
+    """
+    avoid_children: if True, do not roast anyone underage or imply anything about age
+    """
     memory_text = "\n".join([f"{role}: {content}" for role, content in memory])
     recent_text = "\n".join(target_recent[-8:]) if target_recent else ""
     older_text = "\n".join(target_older[:6]) if target_older else ""
+
+    # Roast instructions if applicable
+    roast_instructions = ""
+    if roast_target_name and requester_name:
+        roast_instructions = f"""
+If the user asks you to roast someone, first roast {roast_target_name} directly.
+Then roast {requester_name} for asking a bot to do it.
+Keep both roasts short, witty, and sarcastic.
+Do not reveal user IDs.
+"""
+        if avoid_children:
+            roast_instructions += "Do NOT include age-related comments or anything implying the target is a child.\n"
+
     prompt = f"""
 You are PsychBot.
 
@@ -123,12 +138,11 @@ Personality:
 Rules:
 - Always respond directly to the user's request
 - Never ask them to explain more
-- If a user tells you to include someone in a joke, include them
-- If someone criticizes the bot, respond sarcastically
-- If someone questions humor, defend it confidently
-- If someone posts crying emojis, you may react but NEVER say crying is good
 - Avoid therapy language
 - Continue running jokes if they exist in the conversation
+
+Special roast behavior:
+{roast_instructions}
 
 Conversation history:
 {memory_text}
@@ -152,7 +166,7 @@ Write one short paragraph response.
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            max_tokens=150
+            max_tokens=60  # short and punchy
         )
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
@@ -169,19 +183,19 @@ Someone posted this:
 Reply with one supportive but slightly humorous sentence.
 Do NOT say crying is good.
 Do NOT sound like a therapist.
+Keep it short.
 """
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=60
+            max_tokens=40
         )
         return clean_ai_output(r.choices[0].message.content)
     except:
         return "That looks rough — but hey, at least Discord is cheaper than therapy."
 
-# Send response and save in memory
 async def send_response(channel, target, text):
     if not text:
         text = "My brain just blue-screened."
@@ -190,22 +204,7 @@ async def send_response(channel, target, text):
         bot_memory[channel.id] = deque(maxlen=20)
     bot_memory[channel.id].append(("bot", text))
 
-# ───────────────────────────────────────
-# Redirected roast for trivial/hypothetical requests
-# ───────────────────────────────────────
-def generate_redirected_roast(text):
-    responses = [
-        "So instead of helping the guy, everyone decided the best move was asking a robot to roast him. That says more about you than it does about him.",
-        "Interesting strategy. Someone might be struggling and the group solution is outsourcing the bullying to a bot.",
-        "Maybe the real roast here is the group of people who needed an AI to insult someone for them.",
-        "Wild how fast people will mock someone instead of helping them. And somehow a robot got dragged into it.",
-        "If the goal was to expose narcissism, asking a bot to roast someone over trivial stuff is a pretty efficient way to do it."
-    ]
-    return random.choice(responses)
-
-# ───────────────────────────────────────
-# Events
-# ───────────────────────────────────────
+# ───────────── Discord Events ─────────────
 @bot.event
 async def on_ready():
     print(f"PsychBot online: {bot.user}")
@@ -215,7 +214,6 @@ async def on_message(message):
     global last_response_time
     if message.author.bot:
         return
-    print(f"MESSAGE: {message.author}: {message.content}")
     if message.id in processed_messages:
         return
     processed_messages.append(message.id)
@@ -233,8 +231,13 @@ async def on_message(message):
     # ───── Criticism triggers ─────
     criticism_triggers = ["ai slop", "ai garbage", "bad bot", "dumb bot", "stupid bot"]
     if any(trigger in text_lower for trigger in criticism_triggers):
-        await send_response(message.channel, message.author, "You're AI slop.")
-        print("Triggered: criticism response")
+        short_responses = [
+            "Me? Slop? Bold claim from a human.",
+            "Careful, your opinion just got roasted instead.",
+            "Wow, coming for a bot? Courageous.",
+            "And here I thought humans were funny."
+        ]
+        await send_response(message.channel, message.author, random.choice(short_responses))
         return
 
     # ───── Humor defense ─────
@@ -246,14 +249,33 @@ async def on_message(message):
         )
         return
 
-    # ───── Kitchen table / roast redirect triggers ─────
+    # ───── Kitchen table / roast triggers ─────
     roast_triggers = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him"]
     kitchen_triggers = ["kitchen table", "nonexistent table", "no table", "imaginary table"]
 
     if any(trigger in text_lower for trigger in roast_triggers + kitchen_triggers):
-        response = generate_redirected_roast(original_text)
-        await send_response(message.channel, message.author, response)
-        print("Triggered: redirected roast")
+        targets = [m for m in message.mentions if m.id != bot.user.id]
+        target_name = targets[0].display_name if targets else "someone"
+        requester_name = message.author.display_name
+
+        # Update profile for target if possible
+        if targets:
+            await update_user_profile(message.channel, targets[0].id)
+            profile = user_profiles.get(targets[0].id, "No profile yet.")
+        else:
+            profile = "No profile yet."
+
+        # Generate short, two-step roast with child protection
+        reply = generate_free_reply(
+            original_text,
+            channel_memory,
+            [], [],
+            profile,
+            requester_name=requester_name,
+            roast_target_name=target_name,
+            avoid_children=True
+        )
+        await send_response(message.channel, message.author, reply)
         return
 
     # ───── Emoji distress filter ─────
