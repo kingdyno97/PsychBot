@@ -6,23 +6,41 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from groq import Groq
 
+# -------------------------
+# ENV
+# -------------------------
 load_dotenv()
-
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+# -------------------------
+# BOT SETUP
+# -------------------------
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# -------------------------
+# STATE
+# -------------------------
 chat_memory = deque(maxlen=50)
-
+message_locks = {}
 cooldown = 8
 last_response_time = 0
 
-# prevents duplicate event triggers
-message_cache = set()
+
+# -------------------------
+# CLEAN OUTPUT
+# -------------------------
+def clean_ai_output(text):
+    """
+    Removes usernames, mentions, and extra tags from AI output
+    so we control the format.
+    """
+    text = text.replace("@", "")
+    text = text.replace("<", "").replace(">", "")
+    return text.strip()
 
 
 # -------------------------
@@ -30,10 +48,10 @@ message_cache = set()
 # -------------------------
 def classify_message(text):
 
-    prompt=f"""
-Classify this message.
+    prompt = f"""
+Classify this Discord message.
 
-ATTACK = bullying or insults
+ATTACK = bullying
 DISTRESS = emotional stress
 NORMAL = everything else
 
@@ -44,14 +62,14 @@ Message:
 """
 
     try:
-        r=groq_client.chat.completions.create(
+        r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role":"user","content":prompt}],
             temperature=0,
             max_tokens=5
         )
 
-        result=r.choices[0].message.content.upper()
+        result = r.choices[0].message.content.upper()
 
         if "ATTACK" in result:
             return "ATTACK"
@@ -68,17 +86,16 @@ Message:
 # -------------------------
 # ROAST
 # -------------------------
-def generate_roast(name,msg):
+def generate_roast(msg):
 
     prompt=f"""
-User {name} is talking trash.
+Call out someone talking trash.
 
-Call them out.
-
-Rules:
+Rules
 - witty
 - blunt
 - one sentence
+- DO NOT include names
 """
 
     r=groq_client.chat.completions.create(
@@ -88,21 +105,19 @@ Rules:
         max_tokens=60
     )
 
-    return r.choices[0].message.content.strip()
+    return clean_ai_output(r.choices[0].message.content)
 
 
 # -------------------------
 # SUPPORT
 # -------------------------
-def generate_support(name,msg):
+def generate_support(msg):
 
     prompt=f"""
-User {name} seems stressed.
+Someone seems stressed.
 
-Reply with one supportive sentence.
-
-Message:
-{msg}
+Respond with one supportive sentence.
+Do not include any names.
 """
 
     r=groq_client.chat.completions.create(
@@ -112,13 +127,13 @@ Message:
         max_tokens=60
     )
 
-    return r.choices[0].message.content.strip()
+    return clean_ai_output(r.choices[0].message.content)
 
 
 # -------------------------
 # EVALUATION
 # -------------------------
-def generate_eval(name,recent,older):
+def generate_eval(recent,older):
 
     r_text="\n".join(recent)
     o_text="\n".join(older)
@@ -126,12 +141,10 @@ def generate_eval(name,recent,older):
     prompt=f"""
 Short psychological observation.
 
-Rules:
+Rules
 - 2 sentences
-- observational
-- no speculation
-
-User: {name}
+- observational only
+- do not include any names
 
 Recent:
 {r_text}
@@ -147,7 +160,17 @@ Older:
         max_tokens=120
     )
 
-    return r.choices[0].message.content.strip()
+    return clean_ai_output(r.choices[0].message.content)
+
+
+# -------------------------
+# SAFE SEND
+# -------------------------
+async def send_single_response(message, target, text):
+
+    await message.channel.send(
+        f"{target.mention} {text}"
+    )
 
 
 # -------------------------
@@ -155,7 +178,7 @@ Older:
 # -------------------------
 @bot.event
 async def on_ready():
-    print(f"PsychBot online as {bot.user}")
+    print(f"PsychBot online: {bot.user}")
 
 
 # -------------------------
@@ -169,122 +192,93 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # prevent duplicate processing
-    if message.id in message_cache:
-        return
-
-    message_cache.add(message.id)
-
-    text = message.content.strip()
-
     now = asyncio.get_event_loop().time()
 
+    # HARD DUPLICATE LOCK
+    if message.id in message_locks:
+        if now - message_locks[message.id] < 10:
+            return
+
+    message_locks[message.id] = now
+
+    text = message.content.lower()
+
     # -------------------------
-    # BOT COMMAND VIA MENTION
+    # BOT COMMAND
     # -------------------------
     if bot.user in message.mentions:
 
-        targets=[m for m in message.mentions if m!=bot.user]
+        targets = [m for m in message.mentions if m != bot.user]
 
-        if targets:
+        if not targets:
+            return
 
-            target=targets[0]
+        target = targets[0]
 
-            # ROAST COMMAND
-            if "roast" in text.lower():
+        # ROAST
+        if "roast" in text:
 
-                roast=generate_roast(target.display_name,text)
+            roast = generate_roast(text)
 
-                await message.reply(
-                    f"{target.mention} {roast}",
-                    mention_author=False
-                )
-
-                return
+            await send_single_response(message, target, roast)
+            return
 
 
-            # EVALUATE COMMAND
-            if "eval" in text.lower() or "evaluate" in text.lower():
+        # EVALUATE
+        if "eval" in text or "evaluate" in text:
 
-                recent=[]
-                older=[]
+            recent=[]
+            older=[]
 
-                async for msg in message.channel.history(limit=400):
+            async for msg in message.channel.history(limit=400):
 
-                    if msg.author.id==target.id:
+                if msg.author.id == target.id:
 
-                        if len(recent)<8:
-                            recent.append(msg.content)
+                    if len(recent) < 8:
+                        recent.append(msg.content)
 
-                        elif len(older)<6:
-                            older.append(msg.content)
+                    elif len(older) < 6:
+                        older.append(msg.content)
 
-                    if len(recent)+len(older)>=14:
-                        break
+                if len(recent)+len(older) >= 14:
+                    break
 
-                result=generate_eval(target.display_name,recent,older)
+            result = generate_eval(recent,older)
 
-                await message.reply(
-                    f"Psych eval for {target.mention}:\n{result}",
-                    mention_author=False
-                )
-
-                return
+            await send_single_response(message,target,result)
+            return
 
 
     # -------------------------
     # COOLDOWN
     # -------------------------
-    if now-last_response_time < cooldown:
+    if now - last_response_time < cooldown:
         return
+
 
     # -------------------------
     # AUTO MODERATION
     # -------------------------
-    category=classify_message(text)
+    category = classify_message(text)
 
-    if category=="ATTACK":
+    if category == "ATTACK":
 
-        roast=generate_roast(message.author.display_name,text)
+        roast = generate_roast(text)
 
-        await message.reply(
-            f"{message.author.mention} {roast}",
-            mention_author=False
-        )
+        await send_single_response(message,message.author,roast)
 
-        last_response_time=now
+        last_response_time = now
         return
 
 
-    if category=="DISTRESS":
+    if category == "DISTRESS":
 
-        support=generate_support(message.author.display_name,text)
+        support = generate_support(text)
 
-        await message.reply(
-            f"{message.author.mention} {support}",
-            mention_author=False
-        )
+        await send_single_response(message,message.author,support)
 
-        last_response_time=now
+        last_response_time = now
         return
-
-
-# -------------------------
-# SELF ROAST
-# -------------------------
-@bot.command()
-async def selfdestruct(ctx):
-
-    prompt=f"Roast {ctx.author.display_name} in one funny sentence."
-
-    r=groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0.9,
-        max_tokens=60
-    )
-
-    await ctx.reply(r.choices[0].message.content.strip())
 
 
 # -------------------------
