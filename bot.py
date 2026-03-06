@@ -44,179 +44,111 @@ def clean_ai_output(text):
     return text.replace("@", "").replace("<", "").replace(">", "").strip()
 
 
-def classify_message(text):
-    prompt = f"""
-Return ONLY one word.
-ATTACK = targeted bullying
-DISTRESS = emotional distress
-NORMAL = everything else
-Message:
-{text}
-"""
-    result = safe_groq_sync(prompt, max_tokens=5)
-    if result:
-        result = result.upper()
-        if "ATTACK" in result:
-            return "ATTACK"
-        if "DISTRESS" in result:
-            return "DISTRESS"
-    return "NORMAL"
+def safe_groq_sync(prompt, max_tokens=100, temperature=0.9, retries=3):
+    for _ in range(retries):
+        try:
+            r = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            content = r.choices[0].message.content.strip()
+            if content:
+                return content
+        except:
+            continue
+    return None
 
 
-def generate_user_profile(messages):
-    history = "\n".join(messages[-30:])
-    prompt = f"""
-Analyze the behavioral patterns of this Discord user.
-Write a short 2 sentence psychological observation.
-Messages:
-{history}
-"""
-    result = safe_groq_sync(prompt, max_tokens=120)
-    if result:
-        return clean_ai_output(result)
+async def safe_groq_async(prompt, max_tokens=100, temperature=0.9, retries=3):
+    for _ in range(retries):
+        try:
+            r = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            content = r.choices[0].message.content.strip()
+            if content:
+                return content
+        except:
+            await asyncio.sleep(0.2)
+            continue
     return None
 
 
 async def update_user_profile(channel, user_id):
     history = []
-    async for msg in channel.history(limit=200):
+    async for msg in channel.history(limit=50):
         if msg.author.id == user_id and msg.content.strip():
             history.append(msg.content)
-        if len(history) >= 40:
+        if len(history) >= 20:
             break
-    profile = generate_user_profile(history)
-    if profile:
-        user_profiles[user_id] = profile
+    prompt = f"Analyze user messages:\n{history}\nWrite a 2 sentence observation."
+    result = safe_groq_sync(prompt, max_tokens=60)
+    if result:
+        user_profiles[user_id] = result
 
 
-# ───────────────────────────────────────
-# Safe Groq wrapper
-# ───────────────────────────────────────
-def safe_groq_sync(prompt, max_tokens=120, temperature=0.9, retries=3):
-    """Sync wrapper for classify/profile calls."""
-    for attempt in range(retries):
-        try:
-            r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            content = r.choices[0].message.content.strip()
-            if content:
-                return content
-        except Exception as e:
-            print(f"Groq attempt {attempt+1} failed:", e)
-    return None
-
-
-async def safe_groq_async(prompt, max_tokens=120, temperature=0.9, retries=3):
-    """Async wrapper for async reply generation."""
-    for attempt in range(retries):
-        try:
-            r = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            content = r.choices[0].message.content.strip()
-            if content:
-                return content
-        except Exception as e:
-            print(f"Groq attempt {attempt+1} failed:", e)
-            await asyncio.sleep(0.2)
-    return None
-
-
-# ───────────── AI Response Generators ─────────────
-async def generate_roast_or_analysis(message_text, channel_memory, target_user=None,
+async def generate_roast_or_analysis(message_text, channel, channel_memory, target_user=None,
                                      requester_name=None):
     roast_target_name = target_user.display_name if target_user else None
     profile = "No profile yet."
     if target_user:
-        await update_user_profile(message.channel, target_user.id)
+        await update_user_profile(channel, target_user.id)
         profile = user_profiles.get(target_user.id, profile)
 
-    memory_text = "\n".join(
-        [f"{role}: {content}" for role, content in list(channel_memory)[-5:]]
-    )
+    memory_text = "\n".join([f"{role}: {content}" for role, content in list(channel_memory)[-5:]])
 
     prompt_parts = ""
     if roast_target_name and requester_name:
         prompt_parts = (
-            f"First roast {roast_target_name} directly, then roast {requester_name} "
-            "for asking a bot to roast. Keep it short, witty, safe, no user IDs, "
-            "no playgrounds, no unsafe age jokes."
+            f"Roast {roast_target_name} and then {requester_name} for asking a bot. "
+            "Keep it short, safe, no user IDs, no playgrounds."
         )
 
     prompt = f"""
-You are PsychBot: witty, sarcastic, psychologically observant, dark humor.
-Rules: respond as the bot, never speak for others, avoid therapy language.
-Programmer {PROGRAMMER_NAME} is normal.
+You are PsychBot: witty, sarcastic, dark humor.
 Conversation history: {memory_text}
 User profile: {profile}
-User message: {message_text}
-Write one short paragraph response.
+Message: {message_text}
 {prompt_parts}
+Write a short paragraph.
 """
-
-    result = await safe_groq_async(prompt, max_tokens=120)
+    result = await safe_groq_async(prompt, max_tokens=100)
     if not result:
-        fallback_roasts = [
+        fallback = [
             f"Oops, I tried roasting {roast_target_name or 'someone'} but circuits fried.",
-            "AI malfunction prevented a roast. You're lucky this time.",
             "Pretend I nailed the roast. Really, I did."
         ]
-        return random.choice(fallback_roasts)
+        return random.choice(fallback)
     return clean_ai_output(result)
 
 
 def generate_support(text):
-    prompt = f"""
-Someone posted this:
-{text}
-Reply with one supportive but slightly humorous sentence.
-Keep it short, do NOT sound like a therapist.
-"""
-    result = safe_groq_sync(prompt, max_tokens=40, temperature=0.7)
-    if result:
-        return clean_ai_output(result)
-    return "Rough day? At least Discord is cheaper than therapy."
+    prompt = f"Someone posted:\n{text}\nReply with a short supportive sentence."
+    result = safe_groq_sync(prompt, max_tokens=40)
+    return clean_ai_output(result) if result else "Rough day? At least Discord is cheaper than therapy."
 
 
-def generate_fact_answer(message_text):
-    prompt = f"""
-Answer concisely. Then add: 'But I'm not here to diagnose anyone.'
-Question:
-{message_text}
-"""
+def generate_fact_answer(text):
+    prompt = f"Answer briefly:\n{text}\nThen say: 'But I'm not here to diagnose anyone.'"
     result = safe_groq_sync(prompt, max_tokens=80, temperature=0)
-    if result:
-        return clean_ai_output(result)
-    return "I don't know, but I'm not here to diagnose anyone."
+    return clean_ai_output(result) if result else "I don't know, but I'm not here to diagnose anyone."
 
 
 async def generate_short_free_reply(message_text, channel_memory):
-    memory_text = "\n".join(
-        [f"{role}: {content}" for role, content in list(channel_memory)[-5:]]
-    )
-    prompt = f"""
-You are PsychBot: witty, sarcastic, psychologically observant, dark humor.
-Rules: respond as the bot, short and witty, avoid therapy language.
-Conversation history: {memory_text}
-User message: {message_text}
-Write a one-sentence reply.
-"""
+    memory_text = "\n".join([f"{role}: {content}" for role, content in list(channel_memory)[-5:]])
+    prompt = f"PsychBot short witty reply:\nConversation: {memory_text}\nMessage: {message_text}"
     result = await safe_groq_async(prompt, max_tokens=50)
-    if not result:
-        return "My circuits just hiccuped. Pretend I replied."
-    return clean_ai_output(result)
+    return clean_ai_output(result) if result else "I hiccuped, but I hear you."
 
 
 async def send_response(channel, target, text):
     if not text:
-        text = "My brain just blue-screened."
+        text = "My circuits fried."
     msg = await channel.send(f"{target.mention} {text}" if target else text)
     if channel.id not in bot_memory:
         bot_memory[channel.id] = deque(maxlen=20)
@@ -235,73 +167,45 @@ async def on_message(message):
         return
     processed_messages.append(message.id)
 
-    original_text = message.content[:500]
-    text_lower = original_text.lower()
+    text_lower = message.content.lower()
     channel_id = message.channel.id
     if channel_id not in bot_memory:
         bot_memory[channel_id] = deque(maxlen=20)
-    bot_memory[channel_id].append(("user", original_text))
+    bot_memory[channel_id].append(("user", message.content))
     channel_memory = bot_memory[channel_id]
 
     # Criticism triggers
-    criticism_triggers = ["ai slop", "ai garbage", "bad bot", "dumb bot", "stupid bot"]
-    if any(trigger in text_lower for trigger in criticism_triggers):
-        responses = [
-            "Me? Slop? Bold claim from a human.",
-            "Careful, your opinion just got roasted instead.",
-            "Wow, coming for a bot? Courageous.",
-            "And here I thought humans were funny."
-        ]
-        await send_response(message.channel, message.author, random.choice(responses))
+    if any(word in text_lower for word in ["ai slop", "bad bot", "dumb bot"]):
+        await send_response(message.channel, message.author, "Bold opinion. Here's a roast for free.")
         return
 
-    # Humor defense
-    if "how is" in text_lower and ("humor" in text_lower or "humour" in text_lower):
-        await send_response(
-            message.channel,
-            message.author,
-            "Humor is confidence plus absurdity — analyzing it just added another punchline."
-        )
-        return
-
-    # Roast / analyze / profile / evaluate triggers
-    special_keywords = [
-        "roast", "make fun of", "mock", "insult", "clown on", "destroy him",
-        "evaluate", "diagnose", "analyze", "profile"
-    ]
-    if any(k in text_lower for k in special_keywords):
+    # Roast / analyze / evaluate triggers
+    if any(word in text_lower for word in ["roast", "mock", "analyze", "profile", "evaluate"]):
         targets = [m for m in message.mentions if m.id != bot.user.id]
         target_user = targets[0] if targets else None
-        requester_name = message.author.display_name
         reply = await generate_roast_or_analysis(
-            original_text, channel_memory, target_user=target_user,
-            requester_name=requester_name
+            message.content, message.channel, channel_memory, target_user, message.author.display_name
         )
         await send_response(message.channel, message.author, reply)
         return
 
     # Fact questions
-    fact_keywords = ["who", "what", "where", "when", "why", "how", "is", "are"]
-    if any(original_text.lower().startswith(k) for k in fact_keywords):
-        reply = generate_fact_answer(original_text)
+    if any(message.content.lower().startswith(k) for k in ["who", "what", "where", "when", "why", "how", "is", "are"]):
+        reply = generate_fact_answer(message.content)
         await send_response(message.channel, message.author, reply)
         return
 
-    # Short normal conversation
-    mentioned = bot.user in message.mentions or any(w in text_lower for w in ["psychbot", "bot"])
-    if mentioned:
-        reply = await generate_short_free_reply(original_text, channel_memory)
+    # Short free-form reply
+    if bot.user in message.mentions:
+        reply = await generate_short_free_reply(message.content, channel_memory)
         await send_response(message.channel, message.author, reply)
         return
 
     # Distress
-    emoji_only = all(c in "😭😢🥺😞😔😿 " for c in original_text)
-    category = classify_message(original_text)
-    if emoji_only:
-        category = "NORMAL"
-    if category == "DISTRESS":
-        support = generate_support(original_text)
-        await send_response(message.channel, message.author, support)
+    emoji_only = all(c in "😭😢🥺😞😔😿 " for c in message.content)
+    if classify_message(message.content) == "DISTRESS" and not emoji_only:
+        reply = generate_support(message.content)
+        await send_response(message.channel, message.author, reply)
 
     await bot.process_commands(message)
 
