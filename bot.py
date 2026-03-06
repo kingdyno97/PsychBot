@@ -21,7 +21,7 @@ if not DISCORD_TOKEN or not GROQ_API_KEY:
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ───────────────────────────────────────
-# Bot setup
+# Bot setup – MUST COME FIRST
 # ───────────────────────────────────────
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -150,7 +150,7 @@ async def send_response(channel, target, text):
         print(f"Send response error: {e}")
 
 # ───────────────────────────────────────
-# Events
+# Events – MUST COME AFTER bot definition
 # ───────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -171,9 +171,7 @@ async def on_message(message):
         text = message.content.lower()
         now = asyncio.get_event_loop().time()
 
-        # ───────────────────────────────────────
-        # Bot mentioned → diagnose/evaluate first
-        # ───────────────────────────────────────
+        # Bot mentioned → prioritize diagnose/evaluate
         if bot.user in message.mentions:
             targets = [m for m in message.mentions if m.id != bot.user.id]
             if not targets:
@@ -182,8 +180,9 @@ async def on_message(message):
 
             content_lower = message.content.lower()
 
-            # Diagnose / evaluate keywords (priority)
-            if any(word in content_lower for word in ["diagnose", "evaluate", "eval", "psych", "analysis", "assess"]):
+            # Diagnose / evaluate keywords – CHECK FIRST
+            diagnose_keywords = ["diagnose", "evaluate", "eval", "psych", "analysis", "assess"]
+            if any(word in content_lower for word in diagnose_keywords):
                 recent = []
                 older = []
                 async for msg in message.channel.history(limit=400):
@@ -202,25 +201,21 @@ async def on_message(message):
                 result = generate_eval(recent, older)
                 await send_response(message.channel, target, result)
                 last_response_time = now
-                return  # ← STOP here – no roast or other processing
+                return  # ← CRITICAL: STOP HERE – no roast, no further processing
 
-            # Roast only if no diagnose keyword matched
+            # Only reach roast if NO diagnose keyword was found
             if "roast" in content_lower:
                 roast = generate_roast()
                 await send_response(message.channel, target, roast)
                 last_response_time = now
                 return
 
-        # ───────────────────────────────────────
-        # Cooldown for auto-responses only
-        # ───────────────────────────────────────
+        # Cooldown for auto-responses
         if now - last_response_time < cooldown:
             await bot.process_commands(message)
             return
 
-        # ───────────────────────────────────────
         # Auto detection (non-mentioned messages)
-        # ───────────────────────────────────────
         category = classify_message(text)
 
         if category == "ATTACK":
@@ -233,10 +228,10 @@ async def on_message(message):
             await send_response(message.channel, message.author, support)
             last_response_time = now
 
-        # Always process prefix commands (! commands) at the end
+        # Always process prefix ! commands at the very end
         await bot.process_commands(message)
 
 # ───────────────────────────────────────
-# Run
+# Run bot
 # ───────────────────────────────────────
 bot.run(DISCORD_TOKEN)
