@@ -43,19 +43,25 @@ def clean_ai_output(text):
 
 def classify_message(text):
     prompt = f"""
-You are an extremely strict Discord message classifier.
+You are an extremely strict Discord message classifier. Be VERY conservative.
 
 Return ONLY one word:
 
-ATTACK = ONLY blatant, unambiguous bullying, slurs, direct insults, threats, or hostility clearly intended to harm someone.
-DISTRESS = clear emotional distress, suicidal hints, despair, or cry for help.
-NORMAL = EVERYTHING ELSE, including:
-  - Playful teasing, sarcasm, jokes, compliments, flirting ("sexy", "hot", etc.)
-  - Ambiguous statements that could be interpreted multiple ways
-  - Self-deprecation, memes, edgy humor without clear malice
-  - Messages that require context or "questioning" to see as negative
+ATTACK = ONLY blatant, repeated, targeted bullying intended to deeply harm someone, such as:
+- Telling someone to kill themselves / self-harm
+- Mocking disability, trauma, appearance, race, sexuality in a cruel way
+- Repeated personal attacks designed to break someone down
 
-Be VERY conservative: if it's not 100% obviously hostile toward a person, ALWAYS return NORMAL.
+DISTRESS = clear emotional distress, suicidal hints, despair, or cry for help
+
+NORMAL = EVERYTHING ELSE, including:
+- Casual trash talk ("go fuck yourself", "fuck you", "you're trash", "suck my dick")
+- One-off insults, swearing, edgy humor, sarcasm
+- Jokes, memes, banter, compliments, flirting
+- Playful teasing even if rude
+- Anything that is common lingo or not clearly meant to bully
+
+If it's not 100% obviously severe bullying, ALWAYS return NORMAL. Do NOT overreact to swearing or casual rudeness.
 
 Message:
 {text}
@@ -65,7 +71,7 @@ Message:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,  # very low → consistent & conservative
+            temperature=0.0,  # zero temperature = maximum consistency & strictness
             max_tokens=5
         )
         result = r.choices[0].message.content.upper().strip()
@@ -76,7 +82,7 @@ Message:
         return "NORMAL"
     except Exception as e:
         print(f"Classification error: {e}")
-        return "NORMAL"  # safest fallback
+        return "NORMAL"  # always safe
 
 def generate_roast(target_recent, target_older):
     recent = "\n".join(target_recent[-8:]) if target_recent else "No recent messages."
@@ -85,14 +91,14 @@ def generate_roast(target_recent, target_older):
     prompt = f"""
 You are a brutally honest, psychologically incisive roaster.
 
-Only trigger if the message is a clear attack. Otherwise do not respond.
+Only generate if the trigger is a clear, targeted attack. Otherwise do not respond.
 
 Analyze the target's history. Identify core insecurities, contradictions, defense mechanisms, repeating emotional patterns.
 Deliver ONE devastating, deeply personal sentence that cuts straight to that psychological wound.
 
 Rules:
 - Surgical and insightful — emotional/ego core only
-- NO shallow roasts (hair, clothes, looks, skills)
+- NO shallow roasts (hair, clothes, looks, skills, "sexy", etc.)
 - NO names
 - One sentence only
 
@@ -113,7 +119,7 @@ Older messages (if any):
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
         print(f"Roast error: {e}")
-        return None  # return None to skip sending if generation fails
+        return None  # skip if generation fails
 
 def generate_support():
     prompt = """
@@ -189,7 +195,7 @@ Older:
 
 async def send_response(channel, target, text):
     if text is None:
-        return  # skip if generation failed
+        return
     try:
         await channel.send(f"{target.mention} {text}")
     except Exception as e:
@@ -226,7 +232,6 @@ async def on_message(message):
 
             content_lower = message.content.lower()
 
-            # Diagnose/evaluate priority
             eval_keywords = ["diagnose", "evaluate", "eval", "psych", "analysis", "assess", "psychological"]
             if any(kw in content_lower for kw in eval_keywords):
                 recent = []
@@ -245,7 +250,6 @@ async def on_message(message):
                 last_response_time = now
                 return
 
-            # Roast only if no eval keyword
             if "roast" in content_lower:
                 recent = []
                 older = []
@@ -263,7 +267,7 @@ async def on_message(message):
                 last_response_time = now
                 return
 
-        # Auto-detection – only on clear ATTACK
+        # Auto-detection – ONLY blatant ATTACK
         if now - last_response_time < cooldown:
             await bot.process_commands(message)
             return
@@ -283,12 +287,14 @@ async def on_message(message):
                         break
 
             roast = generate_roast(recent, older)
-            await send_response(message.channel, message.author, roast)
+            if roast:  # only send if generation succeeded
+                await send_response(message.channel, message.author, roast)
             last_response_time = now
 
         elif category == "DISTRESS":
             support = generate_support()
-            await send_response(message.channel, message.author, support)
+            if support:
+                await send_response(message.channel, message.author, support)
             last_response_time = now
 
         await bot.process_commands(message)
