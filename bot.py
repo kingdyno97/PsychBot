@@ -43,25 +43,25 @@ def clean_ai_output(text):
 
 def classify_message(text):
     prompt = f"""
-You are the strictest Discord message classifier possible. Do NOT overreact.
+You are an extremely strict Discord message classifier. Only flag severe cases.
 
 Return ONLY one word:
 
 ATTACK = ONLY severe, direct, targeted bullying with clear intent to harm one specific person, such as:
   - Telling one person to kill themselves / self-harm
   - Repeated cruel mockery of disability, trauma, race, sexuality, appearance, or mental health
-  - Personal attacks designed to deeply degrade one individual
+  - Personal attacks designed to deeply degrade one individual (not group banter)
 
 DISTRESS = obvious emotional distress, suicidal hints, despair, or cry for help
 
 NORMAL = EVERYTHING ELSE, including:
-  - Group banter ("good morning fucktards", "morning losers", "fuck you all", "suck my dick everyone")
-  - Casual trash talk, swearing, one-off insults ("go fuck yourself", "you're trash", "dumbass")
+  - Group banter ("good morning fucktards", "morning losers", "fuck you all")
+  - Casual trash talk, swearing, one-off insults ("go fuck yourself", "you're trash")
   - Playful teasing, sarcasm, edgy humor, jokes, memes
   - Compliments, flirting, light-hearted rudeness
   - Anything ambiguous, funny, group-directed, or not clearly meant to bully one person
 
-If it's not 100% unmistakable personal bullying, ALWAYS return NORMAL. Casual swearing and banter are NORMAL.
+If it's not 100% unmistakable personal bullying, ALWAYS return NORMAL.
 
 Message:
 {text}
@@ -71,7 +71,7 @@ Message:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,  # zero temperature = strict, no creativity, no false positives
+            temperature=0.0,
             max_tokens=5
         )
         result = r.choices[0].message.content.upper().strip()
@@ -89,19 +89,26 @@ def generate_roast(target_recent, target_older):
     older = "\n".join(target_older[:8]) if target_older else ""
 
     prompt = f"""
-You are a savage, witty, psychologically sharp roaster with a dark sense of humor.
+You are a dark-humored, psychologically razor-sharp roaster. Make it entertaining and savage.
 
-Analyze the target's message history. Find their unique quirks, contradictions, ego traps, hidden fears, or funny blind spots.
-Deliver ONE original, hilarious-yet-cutting sentence that roasts their psychological core in an entertaining way.
+Analyze the target's message history. Identify specific patterns like:
+- Projection / deflection
+- Narcissistic traits (grandiosity, entitlement, lack of empathy)
+- Daddy/mommy issues (abandonment fears, authority problems, seeking validation)
+- Avoidance / emotional numbing
+- Insecurity masked as arrogance / humor
+- Control issues / rebranding obsession
+- Other disorders or traits (avoidant, borderline, histrionic, etc.) if evident
+
+Deliver ONE original, hilarious-yet-brutal sentence that exposes their core psychological wound in a fresh, entertaining way.
 
 Rules:
-- Make it funny / clever / entertaining (dark humor OK)
-- Be personal and insightful — use real patterns from messages
-- NO generic tropes ("attention seeking", "mask", "crying for help", "defense mechanism")
-- NO shallow burns (hair, clothes, looks, skills, "sexy")
+- Be funny, clever, and darkly witty — make it land hard but entertaining
+- NO generic lines ("attention seeking", "mask cracking", "crying for help")
+- NO shallow roasts (hair, clothes, looks, skills, "sexy")
 - NO names
 - One sentence only
-- Always fresh, varied, and surprising — never repeat yourself
+- Always vary angle, wording, and humor — be unpredictable and creative
 
 Recent messages:
 {recent}
@@ -114,7 +121,7 @@ Older messages (if any):
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.95,  # higher for creativity & humor variety
+            temperature=1.0,  # higher for humor variety & creativity
             max_tokens=90
         )
         return clean_ai_output(r.choices[0].message.content)
@@ -126,9 +133,9 @@ def generate_support():
     prompt = """
 Someone seems stressed or in distress.
 
-Respond with one kind, grounding, slightly humorous sentence.
+Respond with one kind, grounding sentence with a light touch of dark humor.
 Do not include names.
-Be calm and sincere, with a light touch of wit.
+Be calm and sincere.
 """
     try:
         r = groq_client.chat.completions.create(
@@ -140,7 +147,7 @@ Be calm and sincere, with a light touch of wit.
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
         print(f"Support error: {e}")
-        return "Take a breath, champ — the universe isn't done fucking with you yet, but you're tougher than it thinks."
+        return "Take a breath — the world isn't done trying to break you yet, but you're still here, so clearly it's losing."
 
 def generate_eval(recent, older):
     r_text = "\n".join(recent[-8:]) if recent else ""
@@ -173,7 +180,7 @@ Rules:
 - Neutral, clinical tone
 - No names
 - Base it only on the messages provided
-- Focus on patterns, tone shifts, coping styles, emotional themes
+- Focus on patterns, tone shifts, coping styles, emotional themes, possible projection/deflection/narcissism/attachment issues
 
 Recent:
 {r_text}
