@@ -6,36 +6,23 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from groq import Groq
 
-# -------------------------
-# ENV
-# -------------------------
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not DISCORD_TOKEN or not GROQ_API_KEY:
-    print("Missing env variables")
-    exit()
-
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# -------------------------
-# BOT SETUP
-# -------------------------
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# -------------------------
-# STATE
-# -------------------------
 chat_memory = deque(maxlen=50)
 
 cooldown = 8
 last_response_time = 0
 
-# prevents duplicate replies
-processed_messages = set()
+# prevents duplicate event triggers
+message_cache = set()
 
 
 # -------------------------
@@ -43,28 +30,28 @@ processed_messages = set()
 # -------------------------
 def classify_message(text):
 
-    prompt = f"""
-Classify this Discord message.
+    prompt=f"""
+Classify this message.
 
-ATTACK = bullying
+ATTACK = bullying or insults
 DISTRESS = emotional stress
 NORMAL = everything else
 
-Return ONE word.
+Return one word.
 
 Message:
 {text}
 """
 
     try:
-        r = groq_client.chat.completions.create(
+        r=groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role":"user","content":prompt}],
             temperature=0,
             max_tokens=5
         )
 
-        result = r.choices[0].message.content.upper()
+        result=r.choices[0].message.content.upper()
 
         if "ATTACK" in result:
             return "ATTACK"
@@ -79,22 +66,19 @@ Message:
 
 
 # -------------------------
-# ROAST GENERATOR
+# ROAST
 # -------------------------
-def generate_roast(name, message):
+def generate_roast(name,msg):
 
     prompt=f"""
-User {name} was talking trash.
+User {name} is talking trash.
 
 Call them out.
 
-Rules
+Rules:
 - witty
 - blunt
-- 1 sentence
-
-Message:
-{message}
+- one sentence
 """
 
     r=groq_client.chat.completions.create(
@@ -108,7 +92,7 @@ Message:
 
 
 # -------------------------
-# DISTRESS RESPONSE
+# SUPPORT
 # -------------------------
 def generate_support(name,msg):
 
@@ -132,7 +116,7 @@ Message:
 
 
 # -------------------------
-# PSYCH EVAL
+# EVALUATION
 # -------------------------
 def generate_eval(name,recent,older):
 
@@ -140,11 +124,11 @@ def generate_eval(name,recent,older):
     o_text="\n".join(older)
 
     prompt=f"""
-Provide a short psychological observation.
+Short psychological observation.
 
-Rules
+Rules:
 - 2 sentences
-- observational only
+- observational
 - no speculation
 
 User: {name}
@@ -171,7 +155,7 @@ Older:
 # -------------------------
 @bot.event
 async def on_ready():
-    print(f"Bot ready: {bot.user}")
+    print(f"PsychBot online as {bot.user}")
 
 
 # -------------------------
@@ -185,24 +169,18 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # HARD DUPLICATE PREVENTION
-    if message.id in processed_messages:
+    # prevent duplicate processing
+    if message.id in message_cache:
         return
 
-    processed_messages.add(message.id)
+    message_cache.add(message.id)
 
     text = message.content.strip()
 
-    chat_memory.append(f"{message.author.display_name}: {text}")
-
     now = asyncio.get_event_loop().time()
 
-    if now - last_response_time < cooldown:
-        await bot.process_commands(message)
-        return
-
     # -------------------------
-    # MENTION COMMANDS
+    # BOT COMMAND VIA MENTION
     # -------------------------
     if bot.user in message.mentions:
 
@@ -212,20 +190,20 @@ async def on_message(message):
 
             target=targets[0]
 
-            # ROAST
+            # ROAST COMMAND
             if "roast" in text.lower():
 
                 roast=generate_roast(target.display_name,text)
 
                 await message.reply(
-                    f"{target.mention} {roast}"
+                    f"{target.mention} {roast}",
+                    mention_author=False
                 )
 
-                last_response_time=now
                 return
 
 
-            # EVALUATE
+            # EVALUATE COMMAND
             if "eval" in text.lower() or "evaluate" in text.lower():
 
                 recent=[]
@@ -247,11 +225,18 @@ async def on_message(message):
                 result=generate_eval(target.display_name,recent,older)
 
                 await message.reply(
-                    f"Psych eval for {target.mention}:\n{result}"
+                    f"Psych eval for {target.mention}:\n{result}",
+                    mention_author=False
                 )
 
-                last_response_time=now
                 return
+
+
+    # -------------------------
+    # COOLDOWN
+    # -------------------------
+    if now-last_response_time < cooldown:
+        return
 
     # -------------------------
     # AUTO MODERATION
@@ -263,7 +248,8 @@ async def on_message(message):
         roast=generate_roast(message.author.display_name,text)
 
         await message.reply(
-            f"{message.author.mention} {roast}"
+            f"{message.author.mention} {roast}",
+            mention_author=False
         )
 
         last_response_time=now
@@ -275,13 +261,12 @@ async def on_message(message):
         support=generate_support(message.author.display_name,text)
 
         await message.reply(
-            f"{message.author.mention} {support}"
+            f"{message.author.mention} {support}",
+            mention_author=False
         )
 
         last_response_time=now
         return
-
-    await bot.process_commands(message)
 
 
 # -------------------------
@@ -290,9 +275,7 @@ async def on_message(message):
 @bot.command()
 async def selfdestruct(ctx):
 
-    prompt=f"""
-Roast {ctx.author.display_name} in one funny sentence.
-"""
+    prompt=f"Roast {ctx.author.display_name} in one funny sentence."
 
     r=groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
