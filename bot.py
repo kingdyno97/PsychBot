@@ -31,12 +31,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ───────────────────────────────────────
 # Globals
 # ───────────────────────────────────────
-processing_lock = asyncio.Lock()
 processed_messages = deque(maxlen=5000)
 cooldown = 8
 last_response_time = 0
-bot_memory = {}              # channel_id -> deque of (role, content)
-user_profiles = {}           # user_id -> profile
+bot_memory = {}  # channel_id -> deque of (role, content)
+user_profiles = {}  # user_id -> profile
 
 # ───────────────────────────────────────
 # Helpers
@@ -106,25 +105,26 @@ async def update_user_profile(channel, user_id):
 
 # ───────────── AI Free-form Reply ─────────────
 def generate_free_reply(message_text, memory, target_recent, target_older, profile,
-                        requester_name=None, roast_target_name=None, avoid_children=True):
+                        requester_name=None, roast_target_name=None, long_reply=False):
     """
-    avoid_children: if True, do not roast anyone underage or imply anything about age
+    long_reply: True for roast / evaluation / analysis commands
+    Always use display_name only; never IDs; never speak for someone else
     """
     memory_text = "\n".join([f"{role}: {content}" for role, content in memory])
     recent_text = "\n".join(target_recent[-8:]) if target_recent else ""
     older_text = "\n".join(target_older[:6]) if target_older else ""
 
-    # Roast instructions if applicable
     roast_instructions = ""
-    if roast_target_name and requester_name:
+    if roast_target_name and requester_name and long_reply:
         roast_instructions = f"""
 If the user asks you to roast someone, first roast {roast_target_name} directly.
 Then roast {requester_name} for asking a bot to do it.
-Keep both roasts short, witty, and sarcastic.
+Keep both roasts witty, short, and sarcastic.
 Do not reveal user IDs.
+Avoid literal child locations (playground, school, kindergarten), 
+but you may roast immaturity or age humorously.
+Do not speak for anyone else, only reply from the bot itself.
 """
-        if avoid_children:
-            roast_instructions += "Do NOT include age-related comments or anything implying the target is a child.\n"
 
     prompt = f"""
 You are PsychBot.
@@ -136,10 +136,11 @@ Personality:
 - dark humor
 
 Rules:
-- Always respond directly to the user's request
+- Always respond directly to the author of the message
 - Never ask them to explain more
 - Avoid therapy language
-- Continue running jokes if they exist in the conversation
+- Never reference IDs
+- Continue running jokes if they exist
 
 Special roast behavior:
 {roast_instructions}
@@ -159,21 +160,21 @@ Recent messages from referenced user:
 Older messages:
 {older_text}
 
-Write one short paragraph response.
+Write one short paragraph response from the bot only.
 """
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
-            max_tokens=60  # short and punchy
+            max_tokens=150 if long_reply else 60
         )
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
         print("AI ERROR:", e)
         return "My brain just blue-screened."
 
-# Supportive response for distress
+# ───────────── Supportive Replies ─────────────
 def generate_support(text):
     prompt = f"""
 Someone posted this:
@@ -196,6 +197,7 @@ Keep it short.
     except:
         return "That looks rough — but hey, at least Discord is cheaper than therapy."
 
+# ───────────── Send response ─────────────
 async def send_response(channel, target, text):
     if not text:
         text = "My brain just blue-screened."
@@ -249,23 +251,24 @@ async def on_message(message):
         )
         return
 
-    # ───── Kitchen table / roast triggers ─────
-    roast_triggers = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him"]
-    kitchen_triggers = ["kitchen table", "nonexistent table", "no table", "imaginary table"]
+    # ───── Roast / Eval / Analysis triggers ─────
+    roast_keywords = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him"]
+    special_eval_keywords = ["evaluate", "diagnose", "analyze", "profile"]
+    special_commands = roast_keywords + special_eval_keywords
 
-    if any(trigger in text_lower for trigger in roast_triggers + kitchen_triggers):
+    command_triggered = any(k in text_lower for k in special_commands)
+    if command_triggered:
         targets = [m for m in message.mentions if m.id != bot.user.id]
         target_name = targets[0].display_name if targets else "someone"
         requester_name = message.author.display_name
 
-        # Update profile for target if possible
+        # Update profile if target exists
         if targets:
             await update_user_profile(message.channel, targets[0].id)
             profile = user_profiles.get(targets[0].id, "No profile yet.")
         else:
             profile = "No profile yet."
 
-        # Generate short, two-step roast with child protection
         reply = generate_free_reply(
             original_text,
             channel_memory,
@@ -273,9 +276,23 @@ async def on_message(message):
             profile,
             requester_name=requester_name,
             roast_target_name=target_name,
-            avoid_children=True
+            long_reply=True
         )
         await send_response(message.channel, message.author, reply)
+        return
+
+    # ───── Short replies for normal conversation ─────
+    mentioned = bot.user in message.mentions or any(w in text_lower for w in ["psychbot", "bot"])
+    if mentioned:
+        reply = generate_free_reply(
+            original_text,
+            channel_memory,
+            [], [],
+            profile="No profile yet.",
+            long_reply=False
+        )
+        await send_response(message.channel, message.author, reply)
+        last_response_time = now
         return
 
     # ───── Emoji distress filter ─────
@@ -283,38 +300,6 @@ async def on_message(message):
     category = classify_message(original_text)
     if emoji_only:
         category = "NORMAL"
-
-    # ───── Mention / AI reply ─────
-    mentioned = bot.user in message.mentions or any(w in text_lower for w in ["psychbot", "bot", "table", "roast"])
-    if mentioned:
-        targets = [m for m in message.mentions if m.id != bot.user.id]
-        target = targets[0] if targets else message.author
-
-        recent = []
-        older = []
-        async for msg in message.channel.history(limit=400):
-            if msg.author.id == target.id and msg.content.strip():
-                if len(recent) < 8:
-                    recent.append(msg.content)
-                elif len(older) < 6:
-                    older.append(msg.content)
-                if len(recent) + len(older) >= 14:
-                    break
-
-        await update_user_profile(message.channel, target.id)
-        profile = user_profiles.get(target.id, "No profile yet.")
-
-        reply = generate_free_reply(
-            original_text, channel_memory, recent, older, profile
-        )
-        await send_response(message.channel, target, reply)
-        last_response_time = now
-        return
-
-    # ───── Automatic distress responses ─────
-    if bot.user not in message.mentions and now - last_response_time < cooldown:
-        await bot.process_commands(message)
-        return
 
     if category == "DISTRESS":
         support = generate_support(original_text)
@@ -324,6 +309,6 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ───────────────────────────────────────
-# Run
+# Run bot
 # ───────────────────────────────────────
 bot.run(DISCORD_TOKEN)
