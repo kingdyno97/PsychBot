@@ -43,25 +43,25 @@ def clean_ai_output(text):
 
 def classify_message(text):
     prompt = f"""
-You are an extremely strict Discord message classifier. Only flag severe cases.
+You are the strictest Discord message classifier possible. Do NOT overreact.
 
 Return ONLY one word:
 
-ATTACK = ONLY blatant, direct, targeted bullying or hostility toward ONE specific person, such as:
-- Telling one person to kill themselves / self-harm
-- Repeatedly mocking one person's disability, trauma, appearance, race, sexuality in a cruel way
-- Clear personal attacks aimed to deeply hurt one individual
+ATTACK = ONLY severe, direct, targeted bullying with clear intent to harm one specific person, such as:
+  - Telling one person to kill themselves / self-harm
+  - Repeated cruel mockery of disability, trauma, race, sexuality, appearance, or mental health
+  - Personal attacks designed to deeply degrade one individual
 
-DISTRESS = clear emotional distress, suicidal hints, despair, or cry for help from one person
+DISTRESS = obvious emotional distress, suicidal hints, despair, or cry for help
 
 NORMAL = EVERYTHING ELSE, including:
-- Group trash talk ("good morning fucktards", "morning losers", "fuck you all")
-- Casual swearing, edgy humor, sarcasm aimed at the whole group
-- Playful teasing, memes, banter, compliments, flirting
-- One-off insults that are not targeted or malicious
-- Anything ambiguous, funny, or not clearly intended to bully one person
+  - Group banter ("good morning fucktards", "morning losers", "fuck you all", "suck my dick everyone")
+  - Casual trash talk, swearing, one-off insults ("go fuck yourself", "you're trash", "dumbass")
+  - Playful teasing, sarcasm, edgy humor, jokes, memes
+  - Compliments, flirting, light-hearted rudeness
+  - Anything ambiguous, funny, group-directed, or not clearly meant to bully one person
 
-If it's not 100% obviously severe bullying directed at a single person, ALWAYS return NORMAL. Do NOT overreact to group swearing, casual rudeness, or jokes.
+If it's not 100% unmistakable personal bullying, ALWAYS return NORMAL. Casual swearing and banter are NORMAL.
 
 Message:
 {text}
@@ -71,7 +71,7 @@ Message:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,  # zero temperature = maximum strictness & consistency
+            temperature=0.0,  # zero temperature = strict, no creativity, no false positives
             max_tokens=5
         )
         result = r.choices[0].message.content.upper().strip()
@@ -82,25 +82,26 @@ Message:
         return "NORMAL"
     except Exception as e:
         print(f"Classification error: {e}")
-        return "NORMAL"  # always safe
+        return "NORMAL"
 
 def generate_roast(target_recent, target_older):
-    recent = "\n".join(target_recent[-8:]) if target_recent else "No recent messages."
-    older = "\n".join(target_older[:6]) if target_older else ""
+    recent = "\n".join(target_recent[-12:]) if target_recent else "No recent messages."
+    older = "\n".join(target_older[:8]) if target_older else ""
 
     prompt = f"""
-You are a brutally honest, psychologically incisive roaster.
+You are a savage, witty, psychologically sharp roaster with a dark sense of humor.
 
-Only generate if the trigger is a clear, targeted attack. Otherwise do not respond.
-
-Analyze the target's history. Identify core insecurities, contradictions, defense mechanisms, repeating emotional patterns.
-Deliver ONE devastating, deeply personal sentence that cuts straight to that psychological wound.
+Analyze the target's message history. Find their unique quirks, contradictions, ego traps, hidden fears, or funny blind spots.
+Deliver ONE original, hilarious-yet-cutting sentence that roasts their psychological core in an entertaining way.
 
 Rules:
-- Surgical and insightful — emotional/ego core only
-- NO shallow roasts (hair, clothes, looks, skills, "sexy", etc.)
+- Make it funny / clever / entertaining (dark humor OK)
+- Be personal and insightful — use real patterns from messages
+- NO generic tropes ("attention seeking", "mask", "crying for help", "defense mechanism")
+- NO shallow burns (hair, clothes, looks, skills, "sexy")
 - NO names
 - One sentence only
+- Always fresh, varied, and surprising — never repeat yourself
 
 Recent messages:
 {recent}
@@ -113,8 +114,8 @@ Older messages (if any):
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.85,
-            max_tokens=80
+            temperature=0.95,  # higher for creativity & humor variety
+            max_tokens=90
         )
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
@@ -125,21 +126,21 @@ def generate_support():
     prompt = """
 Someone seems stressed or in distress.
 
-Respond with one kind, grounding sentence.
+Respond with one kind, grounding, slightly humorous sentence.
 Do not include names.
-Be calm and sincere.
+Be calm and sincere, with a light touch of wit.
 """
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.6,
+            temperature=0.7,
             max_tokens=60
         )
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
         print(f"Support error: {e}")
-        return None
+        return "Take a breath, champ — the universe isn't done fucking with you yet, but you're tougher than it thinks."
 
 def generate_eval(recent, older):
     r_text = "\n".join(recent[-8:]) if recent else ""
