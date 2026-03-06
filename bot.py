@@ -100,17 +100,15 @@ async def update_user_profile(channel, user_id):
 # ───────────── AI Responses ─────────────
 async def generate_ai_reply(message_text, channel_memory, target_user=None,
                             requester_name=None, long_reply=False):
-    """Decide which type of reply to generate"""
     roast_target_name = target_user.display_name if target_user else None
     profile = "No profile yet."
     if target_user:
         await update_user_profile(message.channel, target_user.id)
         profile = user_profiles.get(target_user.id, profile)
 
-    memory_text = "\n".join([f"{role}: {content}" for role, content in channel_memory])
+    memory_text = "\n".join([f"{role}: {content}" for role, content in list(channel_memory)[-5:]])
     prompt_parts = []
 
-    # Roast / analyze / profile triggers
     if roast_target_name and requester_name and long_reply:
         prompt_parts.append(
             f"Roast {roast_target_name} directly, then {requester_name} for asking a bot to roast. "
@@ -128,7 +126,7 @@ Write one short paragraph response.
 {''.join(prompt_parts)}
 """
 
-    for attempt in range(2):
+    for attempt in range(2):  # retry twice
         try:
             r = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -142,7 +140,7 @@ Write one short paragraph response.
         except:
             continue
 
-    # Fallback last resort
+    # fallback only if AI fails twice
     fallback_roasts = [
         f"Oops, I tried roasting {roast_target_name or 'someone'} but circuits fried.",
         "AI malfunction prevented a roast. You're lucky this time.",
