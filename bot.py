@@ -1,4 +1,3 @@
-```python
 import os
 import discord
 import asyncio
@@ -341,4 +340,3 @@ async def on_message(message):
 # Run
 # ───────────────────────────────────────
 bot.run(DISCORD_TOKEN)
-```
