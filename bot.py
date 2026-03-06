@@ -43,25 +43,25 @@ def clean_ai_output(text):
 
 def classify_message(text):
     prompt = f"""
-You are an extremely strict Discord message classifier. Be VERY conservative.
+You are an extremely strict Discord message classifier. Only flag severe cases.
 
 Return ONLY one word:
 
-ATTACK = ONLY blatant, repeated, targeted bullying intended to deeply harm someone, such as:
-- Telling someone to kill themselves / self-harm
-- Mocking disability, trauma, appearance, race, sexuality in a cruel way
-- Repeated personal attacks designed to break someone down
+ATTACK = ONLY blatant, direct, targeted bullying or hostility toward ONE specific person, such as:
+- Telling one person to kill themselves / self-harm
+- Repeatedly mocking one person's disability, trauma, appearance, race, sexuality in a cruel way
+- Clear personal attacks aimed to deeply hurt one individual
 
-DISTRESS = clear emotional distress, suicidal hints, despair, or cry for help
+DISTRESS = clear emotional distress, suicidal hints, despair, or cry for help from one person
 
 NORMAL = EVERYTHING ELSE, including:
-- Casual trash talk ("go fuck yourself", "fuck you", "you're trash", "suck my dick")
-- One-off insults, swearing, edgy humor, sarcasm
-- Jokes, memes, banter, compliments, flirting
-- Playful teasing even if rude
-- Anything that is common lingo or not clearly meant to bully
+- Group trash talk ("good morning fucktards", "morning losers", "fuck you all")
+- Casual swearing, edgy humor, sarcasm aimed at the whole group
+- Playful teasing, memes, banter, compliments, flirting
+- One-off insults that are not targeted or malicious
+- Anything ambiguous, funny, or not clearly intended to bully one person
 
-If it's not 100% obviously severe bullying, ALWAYS return NORMAL. Do NOT overreact to swearing or casual rudeness.
+If it's not 100% obviously severe bullying directed at a single person, ALWAYS return NORMAL. Do NOT overreact to group swearing, casual rudeness, or jokes.
 
 Message:
 {text}
@@ -71,7 +71,7 @@ Message:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,  # zero temperature = maximum consistency & strictness
+            temperature=0.0,  # zero temperature = maximum strictness & consistency
             max_tokens=5
         )
         result = r.choices[0].message.content.upper().strip()
@@ -119,7 +119,7 @@ Older messages (if any):
         return clean_ai_output(r.choices[0].message.content)
     except Exception as e:
         print(f"Roast error: {e}")
-        return None  # skip if generation fails
+        return None
 
 def generate_support():
     prompt = """
@@ -287,7 +287,7 @@ async def on_message(message):
                         break
 
             roast = generate_roast(recent, older)
-            if roast:  # only send if generation succeeded
+            if roast:
                 await send_response(message.channel, message.author, roast)
             last_response_time = now
 
