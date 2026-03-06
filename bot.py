@@ -36,6 +36,7 @@ cooldown = 8
 last_response_time = 0
 bot_memory = {}  # channel_id -> deque of (role, content)
 user_profiles = {}  # user_id -> profile
+PROGRAMMER_NAME = "Austin"  # known programmer, treated as normal user
 
 # ───────────────────────────────────────
 # Helpers
@@ -106,10 +107,6 @@ async def update_user_profile(channel, user_id):
 # ───────────── AI Free-form Reply ─────────────
 def generate_free_reply(message_text, memory, target_recent, target_older, profile,
                         requester_name=None, roast_target_name=None, long_reply=False):
-    """
-    long_reply: True for roast / evaluation / analysis commands
-    Always use display_name only; never IDs; never speak for someone else
-    """
     memory_text = "\n".join([f"{role}: {content}" for role, content in memory])
     recent_text = "\n".join(target_recent[-8:]) if target_recent else ""
     older_text = "\n".join(target_older[:6]) if target_older else ""
@@ -141,6 +138,7 @@ Rules:
 - Avoid therapy language
 - Never reference IDs
 - Continue running jokes if they exist
+- Treat the programmer {PROGRAMMER_NAME} like a normal user
 
 Special roast behavior:
 {roast_instructions}
@@ -173,6 +171,25 @@ Write one short paragraph response from the bot only.
     except Exception as e:
         print("AI ERROR:", e)
         return "My brain just blue-screened."
+
+# ───────────── Quick factual answer ─────────────
+def generate_fact_answer(message_text):
+    prompt = f"""
+Answer the factual question concisely. Then append: 'But I'm not here to diagnose anyone.'
+
+Question:
+{message_text}
+"""
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80
+        )
+        return clean_ai_output(r.choices[0].message.content)
+    except:
+        return "I don't know, but I'm not here to diagnose anyone."
 
 # ───────────── Supportive Replies ─────────────
 def generate_support(text):
@@ -255,14 +272,13 @@ async def on_message(message):
     roast_keywords = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him"]
     special_eval_keywords = ["evaluate", "diagnose", "analyze", "profile"]
     special_commands = roast_keywords + special_eval_keywords
-
     command_triggered = any(k in text_lower for k in special_commands)
+
     if command_triggered:
         targets = [m for m in message.mentions if m.id != bot.user.id]
         target_name = targets[0].display_name if targets else "someone"
         requester_name = message.author.display_name
 
-        # Update profile if target exists
         if targets:
             await update_user_profile(message.channel, targets[0].id)
             profile = user_profiles.get(targets[0].id, "No profile yet.")
@@ -278,6 +294,13 @@ async def on_message(message):
             roast_target_name=target_name,
             long_reply=True
         )
+        await send_response(message.channel, message.author, reply)
+        return
+
+    # ───── Fact question detection ─────
+    fact_keywords = ["who", "what", "where", "when", "why", "how", "is", "are"]
+    if any(original_text.lower().startswith(k) for k in fact_keywords):
+        reply = generate_fact_answer(original_text)
         await send_response(message.channel, message.author, reply)
         return
 
