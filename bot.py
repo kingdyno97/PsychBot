@@ -35,16 +35,31 @@ processed_messages = deque(maxlen=5000)
 processed_message_ids = set()
 
 cooldown = 8
-last_response_time = 0.0
+channel_last_response_time = {}  # channel_id -> monotonic timestamp
 
 bot_memory = {}  # channel_id -> deque[(role, content)]
 user_profiles = {}  # user_id -> profile
 profile_updated_at = {}  # user_id -> monotonic time
+pending_profile_updates = set()
 
 PROFILE_REFRESH_SECONDS = 300
-GROQ_TIMEOUT_SECONDS = 12
+GROQ_TIMEOUT_SECONDS = 30
 GROQ_CONCURRENCY = 3
+GROQ_RETRIES = 2
 groq_semaphore = asyncio.Semaphore(GROQ_CONCURRENCY)
+
+configured_model = os.getenv("GROQ_MODEL")
+MODEL_CANDIDATES = [m for m in [
+    configured_model,
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
+    "mixtral-8x7b-32768",
+] if m]
+
+active_model = None
+groq_error_count = 0
+last_groq_error = ""
+SCRIPT_VERSION = "psychbot-2026-03-06-r3"
 
 
 # ───────────────────────────────────────
@@ -70,23 +85,94 @@ def remember_message_id(message_id: int) -> bool:
 
 
 async def groq_chat(prompt: str, temperature: float, max_tokens: int) -> str:
-    def _request():
+    global active_model, groq_error_count, last_groq_error
+
+    candidate_models = []
+    if active_model:
+        candidate_models.append(active_model)
+    for m in MODEL_CANDIDATES:
+        if m not in candidate_models:
+            candidate_models.append(m)
+
+    if not candidate_models:
+        raise RuntimeError("No Groq model candidates configured.")
+
+    def _request(model_name: str):
         return groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=model_name,
             messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
             max_tokens=max_tokens,
         )
 
-    async with groq_semaphore:
-        response = await asyncio.wait_for(asyncio.to_thread(_request), timeout=GROQ_TIMEOUT_SECONDS)
-    return clean_ai_output(response.choices[0].message.content)
+    last_error = None
+    for model_name in candidate_models:
+        for attempt in range(GROQ_RETRIES + 1):
+            try:
+                async with groq_semaphore:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(_request, model_name),
+                        timeout=GROQ_TIMEOUT_SECONDS,
+                    )
+                active_model = model_name
+                return clean_ai_output(response.choices[0].message.content)
+            except Exception as e:
+                last_error = e
+                groq_error_count += 1
+                last_groq_error = f"{type(e).__name__}: {e}"
+                err = str(e).lower()
+
+                # If model is invalid/deprecated, move to next model immediately.
+                if ("model" in err and "not" in err and "found" in err) or "deprecat" in err:
+                    break
+
+                if attempt < GROQ_RETRIES:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                break
+
+    raise last_error if last_error else RuntimeError("Unknown Groq error")
 
 
 def channel_memory_for(channel_id: int) -> deque:
     if channel_id not in bot_memory:
         bot_memory[channel_id] = deque(maxlen=20)
     return bot_memory[channel_id]
+
+
+def likely_emotional_content(text_lower: str) -> bool:
+    distress_cues = [
+        "sad",
+        "depressed",
+        "depression",
+        "anxious",
+        "anxiety",
+        "stressed",
+        "stress",
+        "hate my life",
+        "i'm done",
+        "i am done",
+        "can't do this",
+        "cant do this",
+        "crying",
+        "overwhelmed",
+        "lonely",
+        "hurt",
+        "panic",
+        "panic attack",
+        "suicidal",
+        "kill myself",
+    ]
+    attack_cues = [
+        "idiot",
+        "stupid",
+        "dumb",
+        "loser",
+        "trash",
+        "worthless",
+        "kys",
+    ]
+    return any(cue in text_lower for cue in distress_cues + attack_cues)
 
 
 # ───────────────────────────────────────
@@ -151,6 +237,36 @@ async def update_user_profile(channel, user_id: int):
     if profile:
         user_profiles[user_id] = profile
         profile_updated_at[user_id] = now
+
+
+async def refresh_profile_background(channel, user_id: int):
+    if user_id in pending_profile_updates:
+        return
+    pending_profile_updates.add(user_id)
+    try:
+        await update_user_profile(channel, user_id)
+    except Exception as e:
+        print(f"refresh_profile_background error for {user_id}:", e)
+    finally:
+        pending_profile_updates.discard(user_id)
+
+
+def local_fallback_reply(message_text: str, roast_target_name=None, requester_name=None) -> str:
+    text_lower = message_text.lower()
+    if roast_target_name and requester_name:
+        return (
+            f"{roast_target_name} talks like a loading screen, "
+            f"and {requester_name} outsourced the punchline."
+        )
+    if "roast" in text_lower or "mock" in text_lower or "insult" in text_lower:
+        return "You asked for heat, so here it is: loud confidence is still not personality."
+    return random.choice(
+        [
+            "That message had energy; now give it direction.",
+            "You brought chaos, I brought structure.",
+            "Noted. Continue.",
+        ]
+    )
 
 
 async def generate_free_reply(
@@ -219,7 +335,7 @@ Write one short paragraph response.
         return await groq_chat(prompt, temperature=0.9, max_tokens=80)
     except Exception as e:
         print("generate_free_reply error:", e)
-        return "My brain just blue-screened."
+        return local_fallback_reply(message_text, roast_target_name, requester_name)
 
 
 async def generate_support(text: str) -> str:
@@ -241,11 +357,8 @@ Keep it short.
 
 
 async def send_response(channel, target, text: str):
-    text = clean_ai_output(text) if text else "My brain just blue-screened."
-    await channel.send(
-        f"{target.mention} {text}" if target else text,
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-    )
+    text = clean_ai_output(text) if text else "Say that again and I will answer properly."
+    await channel.send(f"{target.mention} {text}" if target else text, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
     channel_memory_for(channel.id).append(("bot", text))
 
 
@@ -254,13 +367,22 @@ async def send_response(channel, target, text: str):
 # ───────────────────────────────────────
 @bot.event
 async def on_ready():
-    print(f"PsychBot online: {bot.user}")
+    candidate_list = ", ".join(MODEL_CANDIDATES)
+    print(f"PsychBot online: {bot.user} | version={SCRIPT_VERSION} | model_candidates=[{candidate_list}]")
+
+
+@bot.command(name="health")
+async def health(ctx):
+    model = active_model or "none-yet"
+    err = last_groq_error if last_groq_error else "none"
+    await ctx.send(
+        f"version={SCRIPT_VERSION} model={model} groq_errors={groq_error_count} last_error={err}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @bot.event
 async def on_message(message):
-    global last_response_time
-
     if message.author.bot:
         return
 
@@ -274,8 +396,10 @@ async def on_message(message):
 
     text_lower = original_text.lower()
     now = monotonic()
+    channel_id = message.channel.id
+    last_response_time = channel_last_response_time.get(channel_id, 0.0)
 
-    channel_memory = channel_memory_for(message.channel.id)
+    channel_memory = channel_memory_for(channel_id)
     channel_memory.append(("user", original_text))
 
     # ───── Criticism triggers ─────
@@ -311,8 +435,8 @@ async def on_message(message):
         requester_name = message.author.display_name
 
         if targets:
-            await update_user_profile(message.channel, targets[0].id)
             profile = user_profiles.get(targets[0].id, "No profile yet.")
+            asyncio.create_task(refresh_profile_background(message.channel, targets[0].id))
         else:
             profile = "No profile yet."
 
@@ -327,12 +451,12 @@ async def on_message(message):
             avoid_children=True,
         )
         await send_response(message.channel, message.author, reply)
-        last_response_time = now
+        channel_last_response_time[channel_id] = now
         await bot.process_commands(message)
         return
 
     # ───── Mention / AI reply ─────
-    mentioned = bot.user in message.mentions or any(w in text_lower for w in ["psychbot", "table"])
+    mentioned = bot.user in message.mentions or "psychbot" in text_lower
     if mentioned:
         targets = [m for m in message.mentions if m.id != bot.user.id]
         target = targets[0] if targets else message.author
@@ -348,12 +472,12 @@ async def on_message(message):
                 if len(recent) + len(older) >= 14:
                     break
 
-        await update_user_profile(message.channel, target.id)
         profile = user_profiles.get(target.id, "No profile yet.")
+        asyncio.create_task(refresh_profile_background(message.channel, target.id))
 
         reply = await generate_free_reply(original_text, channel_memory, recent, older, profile)
         await send_response(message.channel, target, reply)
-        last_response_time = now
+        channel_last_response_time[channel_id] = now
         await bot.process_commands(message)
         return
 
@@ -363,7 +487,12 @@ async def on_message(message):
         return
 
     emoji_only = all(c in "😭😢🥺😞😔😿 " for c in original_text)
-    category = "NORMAL" if emoji_only else await classify_message(original_text)
+    if emoji_only:
+        category = "NORMAL"
+    elif likely_emotional_content(text_lower):
+        category = await classify_message(original_text)
+    else:
+        category = "NORMAL"
 
     if category == "ATTACK":
         quick_roast = random.choice(
@@ -374,11 +503,11 @@ async def on_message(message):
             ]
         )
         await send_response(message.channel, message.author, quick_roast)
-        last_response_time = now
+        channel_last_response_time[channel_id] = now
     elif category == "DISTRESS":
         support = await generate_support(original_text)
         await send_response(message.channel, message.author, support)
-        last_response_time = now
+        channel_last_response_time[channel_id] = now
 
     await bot.process_commands(message)
 
