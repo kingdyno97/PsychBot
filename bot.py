@@ -23,19 +23,26 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 # ───────────────────────────────────────
 # Bot setup
 # ───────────────────────────────────────
-intents = discord.Intents.all()
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ───────────────────────────────────────
 # Globals
 # ───────────────────────────────────────
 processing_lock = asyncio.Lock()
-processed_messages = set()
+processed_messages = deque(maxlen=5000)
+
 cooldown = 8
 last_response_time = 0
 
-# Memory: last 10 bot replies in this channel (for callbacks and continuity)
-bot_memory = {}  # channel_id -> deque of (message_id, content) tuples, maxlen=10
+# Channel memory
+bot_memory = {}
+
+# Psychological profiles
+user_profiles = {}
 
 # ───────────────────────────────────────
 # Helpers
@@ -45,15 +52,16 @@ def clean_ai_output(text):
     text = text.replace("<", "").replace(">", "")
     return text.strip()
 
+
 def classify_message(text):
     prompt = f"""
 Strict classifier. Return ONLY one word.
 
-ATTACK = blatant targeted bullying (kill yourself, mock disability/trauma/race/sexuality cruelly)
-DISTRESS = clear suicide/distress/cry for help
-NORMAL = everything else (group banter, casual swearing, jokes, sarcasm, compliments, bot-teasing)
+ATTACK = blatant targeted bullying
+DISTRESS = clear emotional distress
+NORMAL = everything else
 
-If in doubt, return NORMAL.
+If unsure return NORMAL.
 
 Message:
 {text}
@@ -62,157 +70,238 @@ Message:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
+            temperature=0,
             max_tokens=5
         )
+
         result = r.choices[0].message.content.upper().strip()
+
         if "ATTACK" in result:
             return "ATTACK"
+
         if "DISTRESS" in result:
             return "DISTRESS"
+
         return "NORMAL"
+
     except:
         return "NORMAL"
 
-def generate_roast(target_recent, target_older):
-    recent = "\n".join(target_recent[-12:]) if target_recent else "No recent messages."
-    older = "\n".join(target_older[:8]) if target_older else ""
+
+# ───────────────────────────────────────
+# Psychological profiles
+# ───────────────────────────────────────
+def generate_user_profile(history):
+
+    history_text = "\n".join(history[-30:])
 
     prompt = f"""
-Dark, witty psychological roaster. Make it entertaining.
+Analyze the psychological behavior patterns of this Discord user.
 
-Analyze history. Find unique patterns: projection, deflection, narcissism, daddy/mommy issues, avoidance, control obsession, etc.
-Deliver ONE savage, hilarious sentence that hits their core wound in a fresh, funny way.
+Write a short 2-3 sentence behavioral profile.
 
-Rules:
-- Be clever, dark humor OK
-- NO repeating tropes (attention seeking, mask, cry for help)
-- NO shallow burns (looks, clothes, skills)
-- NO names
-- One sentence only
-- Always original and surprising
+Focus on traits like:
+- sarcasm
+- insecurity
+- attention seeking
+- defensive humor
+- argumentative style
 
-Recent:
-{recent}
-
-Older:
-{older}
+Messages:
+{history_text}
 """
+
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=1.0,
-            max_tokens=90
+            temperature=0.5,
+            max_tokens=120
         )
+
         return clean_ai_output(r.choices[0].message.content)
+
     except:
         return None
 
-def generate_support(original_text):
-    prompt = f"""
-Someone seems distressed (message: "{original_text}").
 
-Reply with one kind sentence that has dark, sarcastic humor but is still supportive.
-No names.
-Keep it light but real, infuse humor to lighten the mood without dismissing feelings.
+async def update_user_profile(channel, user_id):
+
+    history = []
+
+    async for msg in channel.history(limit=300):
+
+        if msg.author.id == user_id and msg.content.strip():
+            history.append(msg.content)
+
+        if len(history) >= 40:
+            break
+
+    profile = generate_user_profile(history)
+
+    if profile:
+        user_profiles[user_id] = profile
+
+
+# ───────────────────────────────────────
+# AI Generators
+# ───────────────────────────────────────
+def generate_roast(current, recent, older, profile):
+
+    recent_text = "\n".join(recent[-10:])
+    older_text = "\n".join(older[:6])
+
+    prompt = f"""
+Write one savage but clever psychological roast.
+
+Use humor and behavioral observations.
+
+User profile:
+{profile}
+
+Current message:
+{current}
+
+Recent messages:
+{recent_text}
+
+Older messages:
+{older_text}
+
+Rules:
+- one sentence
+- dark humor allowed
+- no names
+- no generic insults
 """
+
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
+            temperature=1,
+            max_tokens=80
+        )
+
+        return clean_ai_output(r.choices[0].message.content)
+
+    except:
+        return None
+
+
+def generate_support(text):
+
+    prompt = f"""
+Someone posted this message:
+
+{text}
+
+Respond with one supportive but slightly humorous sentence.
+
+Do not say crying is good.
+Do not sound like a therapist.
+"""
+
+    try:
+        r = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
             max_tokens=60
         )
+
         return clean_ai_output(r.choices[0].message.content)
+
     except:
-        return "Damn, that hit deep. Take a breath — you're still here, so the darkness hasn't won yet... yet."
+        return "That looks rough — but hey, at least Discord is cheaper than therapy."
 
-def generate_eval(recent, older):
-    r_text = "\n".join(recent[-8:]) if recent else ""
-    o_text = "\n".join(older[:6]) if older else ""
 
-    if len(recent) + len(older) < 3:
-        return "Not enough message history to diagnose properly — the target is either a ghost or wisely staying quiet."
+def generate_free_reply(message_text, memory, target_recent, target_older, profile):
+
+    memory_text = "\n".join([f"{role}: {content}" for role, content in memory])
+
+    recent_text = "\n".join(target_recent[-8:])
+    older_text = "\n".join(target_older[:6])
 
     prompt = f"""
-Short psychological observation (exactly 2 sentences).
+You are PsychBot.
 
-Neutral, clinical tone.
-No names.
-Focus on patterns, projection, deflection, narcissism, attachment issues, coping mechanisms.
+Personality:
+- witty
+- sarcastic
+- psychologically observant
+- confident humor
 
-Recent:
-{r_text}
+Rules:
 
-Older:
-{o_text}
+Always respond directly to the user's message.
+
+Never ask the user to explain more.
+
+If the user references a person or asks you to include someone,
+you must include them in the joke.
+
+If someone criticizes the bot,
+respond sarcastically.
+
+If someone questions the humor,
+defend it confidently.
+
+If someone posts crying emojis,
+you may respond humorously but NEVER say crying is good.
+
+Avoid therapist language.
+
+Maintain running jokes from the conversation.
+
+Conversation:
+{memory_text}
+
+User psychological profile:
+{profile}
+
+User message:
+{message_text}
+
+Recent messages from referenced user:
+{recent_text}
+
+Older messages:
+{older_text}
+
+Write one short paragraph response.
 """
+
     try:
-        r = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.65,
-            max_tokens=120
-        )
-        return clean_ai_output(r.choices[0].message.content)
-    except:
-        return "Insufficient data for meaningful evaluation."
 
-def generate_free_reply(original_message, memory_context, target_recent=None, target_older=None):
-    memory_str = "\n".join([content for _, content in memory_context]) if memory_context else "No prior bot replies in this channel."
-    
-    # Include target history if available (for continuity when elaborating on users)
-    target_recent_str = "\n".join(target_recent[-8:]) if target_recent else ""
-    target_older_str = "\n".join(target_older[:6]) if target_older else ""
-
-    prompt = f"""
-You are PsychBot — edgy, sarcastic, psychologically sharp, darkly funny AI.
-
-The user just said: "{original_message}"
-
-If the user is asking to elaborate on something (e.g., talk more about a previous idea like 'non-existent kitchen table'), reference your past statements and build on them cleverly.
-Enforce and expand on previous roasts/ideas if referenced (e.g., if they mention crying at non-existent table, double down humorously).
-
-Previous things you've said in this channel (reference if relevant for continuity):
-{memory_str}
-
-If elaborating on a specific user, their recent messages:
-{target_recent_str}
-
-Their older messages:
-{target_older_str}
-
-Reply naturally — answer questions, react to statements, be witty/sarcastic/insightful.
-Keep it entertaining, a bit mean if it fits, but never cruel for no reason.
-Use dark humor where appropriate.
-One short paragraph max unless it's deep or elaborating.
-No names unless directly addressing.
-"""
-    try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.9,
             max_tokens=150
         )
-        return clean_ai_output(r.choices[0].message.content)
-    except Exception as e:
-        print(f"Free reply error: {e}")
-        return "Wow, deep question. My circuits are shorting out from how profound that was. Try again?"
 
+        return clean_ai_output(r.choices[0].message.content)
+
+    except:
+        return "My brain buffer just overflowed — try that again."
+
+
+# ───────────────────────────────────────
+# Send response
+# ───────────────────────────────────────
 async def send_response(channel, target, text):
-    if text is None:
+
+    if not text:
         return
-    try:
-        msg = await channel.send(f"{target.mention} {text}" if target else text)
-        # Store bot's own reply in memory
-        if channel.id not in bot_memory:
-            bot_memory[channel.id] = deque(maxlen=10)
-        bot_memory[channel.id].append((msg.id, text))
-        return msg
-    except Exception as e:
-        print(f"Send error: {e}")
+
+    msg = await channel.send(f"{target.mention} {text}" if target else text)
+
+    if channel.id not in bot_memory:
+        bot_memory[channel.id] = deque(maxlen=20)
+
+    bot_memory[channel.id].append(("bot", text))
+
 
 # ───────────────────────────────────────
 # Events
@@ -221,120 +310,141 @@ async def send_response(channel, target, text):
 async def on_ready():
     print(f"PsychBot online: {bot.user}")
 
+
 @bot.event
 async def on_message(message):
+
     global last_response_time
 
     if message.author.bot:
         return
 
-    async with processing_lock:
-        if message.id in processed_messages:
-            return
-        processed_messages.add(message.id)
+    if message.id in processed_messages:
+        return
 
-        original_text = message.content
-        text_lower = original_text.lower()
-        now = asyncio.get_event_loop().time()
+    processed_messages.append(message.id)
 
-        channel_id = message.channel.id
-        if channel_id not in bot_memory:
-            bot_memory[channel_id] = deque(maxlen=10)
-        channel_memory = bot_memory[channel_id]
+    original_text = message.content[:500]
+    text_lower = original_text.lower()
 
-        # Bot mentioned → special commands first
-        if bot.user in message.mentions:
-            targets = [m for m in message.mentions if m.id != bot.user.id]
-            target = targets[0] if targets else None
+    now = asyncio.get_event_loop().time()
 
-            eval_keywords = ["diagnose", "evaluate", "eval", "psych", "analysis", "assess", "psychological"]
-            if any(kw in text_lower for kw in eval_keywords):
-                recent = []
-                older = []
-                async for msg in message.channel.history(limit=400):
-                    if msg.author.id == (target.id if target else message.author.id) and msg.content.strip():
-                        if len(recent) < 8:
-                            recent.append(msg.content)
-                        elif len(older) < 6:
-                            older.append(msg.content)
-                        if len(recent) + len(older) >= 14:
-                            break
+    channel_id = message.channel.id
 
-                result = generate_eval(recent, older)
-                await send_response(message.channel, target or message.author, result)
-                last_response_time = now
-                return
+    if channel_id not in bot_memory:
+        bot_memory[channel_id] = deque(maxlen=20)
 
-            if "roast" in text_lower:
-                recent = []
-                older = []
-                async for msg in message.channel.history(limit=400):
-                    if msg.author.id == (target.id if target else message.author.id) and msg.content.strip():
-                        if len(recent) < 8:
-                            recent.append(msg.content)
-                        elif len(older) < 6:
-                            older.append(msg.content)
-                        if len(recent) + len(older) >= 14:
-                            break
+    bot_memory[channel_id].append(("user", original_text))
 
-                roast = generate_roast(recent, older)
-                if roast:
-                    await send_response(message.channel, target or message.author, roast)
-                last_response_time = now
-                return
+    channel_memory = bot_memory[channel_id]
 
-            # Free-form reply if no command matched (handles questions, statements, elaborations)
-            # Fetch target history if mentioning a target for better context
-            target_recent = None
-            target_older = None
-            if target:
-                target_recent = []
-                target_older = []
-                async for msg in message.channel.history(limit=400):
-                    if msg.author.id == target.id and msg.content.strip():
-                        if len(target_recent) < 8:
-                            target_recent.append(msg.content)
-                        elif len(target_older) < 6:
-                            target_older.append(msg.content)
-                        if len(target_recent) + len(target_older) >= 14:
-                            break
+    # ───────── criticism clapbacks
 
-            reply = generate_free_reply(original_message, channel_memory, target_recent, target_older)
-            await send_response(message.channel, target or message.author, reply)
-            last_response_time = now
+    criticism_map = {
+        "ai slop": "You're AI slop.",
+        "bad bot": "Bad user.",
+        "dumb bot": "Dumb human.",
+        "stupid bot": "Stupid question generator detected."
+    }
+
+    for phrase, reply in criticism_map.items():
+
+        if phrase in text_lower:
+            await send_response(message.channel, message.author, reply)
             return
 
-        # Auto-detection – ONLY blatant ATTACK or DISTRESS
-        if now - last_response_time < cooldown:
-            await bot.process_commands(message)
-            return
+    # ───────── humor defense
 
-        category = classify_message(original_text)  # Use original for better classification
+    if "how is" in text_lower and ("humor" in text_lower or "humour" in text_lower):
 
-        if category == "ATTACK":
-            recent = []
-            older = []
-            async for msg in message.channel.history(limit=400):
-                if msg.author.id == message.author.id and msg.content.strip():
-                    if len(recent) < 8:
-                        recent.append(msg.content)
-                    elif len(older) < 6:
-                        older.append(msg.content)
-                    if len(recent) + len(older) >= 14:
-                        break
+        await send_response(
+            message.channel,
+            message.author,
+            "Humor is confidence plus absurdity — the fact you stopped to analyze it just added another punchline."
+        )
 
-            roast = generate_roast(recent, older)
-            if roast:
-                await send_response(message.channel, message.author, roast)
-            last_response_time = now
+        return
 
-        elif category == "DISTRESS":
-            support = generate_support(original_text)  # Pass original for context
-            if support:
-                await send_response(message.channel, message.author, support)
-            last_response_time = now
+    # ───────── emoji distress filter
 
-        await bot.process_commands(message)
+    emoji_only = all(c in "😭😢🥺😞😔😿 " for c in original_text)
+
+    category = classify_message(original_text)
+
+    if emoji_only:
+        category = "NORMAL"
+
+    # ───────── mention logic
+
+    if bot.user in message.mentions:
+
+        targets = [m for m in message.mentions if m.id != bot.user.id]
+        target = targets[0] if targets else message.author
+
+        recent = []
+        older = []
+
+        async for msg in message.channel.history(limit=400):
+
+            if msg.author.id == target.id and msg.content.strip():
+
+                if len(recent) < 8:
+                    recent.append(msg.content)
+
+                elif len(older) < 6:
+                    older.append(msg.content)
+
+                if len(recent) + len(older) >= 14:
+                    break
+
+        await update_user_profile(message.channel, target.id)
+
+        profile = user_profiles.get(target.id, "No profile yet.")
+
+        reply = generate_free_reply(
+            original_text,
+            channel_memory,
+            recent,
+            older,
+            profile
+        )
+
+        await send_response(message.channel, target, reply)
+
+        last_response_time = now
+
+        return
+
+    # ───────── automatic responses
+
+    if now - last_response_time < cooldown:
+        return
+
+    if category == "ATTACK":
+
+        await update_user_profile(message.channel, message.author.id)
+
+        profile = user_profiles.get(message.author.id, "")
+
+        roast = generate_roast(
+            original_text,
+            [],
+            [],
+            profile
+        )
+
+        await send_response(message.channel, message.author, roast)
+
+        last_response_time = now
+
+    elif category == "DISTRESS":
+
+        support = generate_support(original_text)
+
+        await send_response(message.channel, message.author, support)
+
+        last_response_time = now
+
 
 # ───────────────────────────────────────
 # Run
