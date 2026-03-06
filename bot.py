@@ -70,7 +70,52 @@ for _model in raw_model_candidates:
 active_model: Optional[str] = None
 groq_error_count = 0
 last_groq_error = ""
-SCRIPT_VERSION = "psychbot-2026-03-06-r4"
+SCRIPT_VERSION = "psychbot-2026-03-06-r5"
+
+EVAL_TERMS = ["evaluate", "eval", "analyze", "analyse", "diagnose", "diagnosis", "psychoanalyze", "psychoanalyse"]
+ROAST_TERMS = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him", "destroy her", "destroy them"]
+KITCHEN_TERMS = ["kitchen table", "nonexistent table", "no table", "imaginary table"]
+
+HATE_SLURS = [
+    "faggot",
+    "nigger",
+    "kike",
+    "chink",
+    "spic",
+    "tranny",
+    "raghead",
+]
+HATE_PHRASES = [
+    "white power",
+    "heil hitler",
+    "go back to your country",
+    "your kind",
+    "subhuman",
+    "exterminate",
+]
+IDENTITY_TERMS = [
+    "black",
+    "white",
+    "asian",
+    "latino",
+    "mexican",
+    "muslim",
+    "jew",
+    "jewish",
+    "christian",
+    "gay",
+    "lesbian",
+    "trans",
+    "disabled",
+]
+DEROGATORY_TERMS = [
+    "are trash",
+    "are animals",
+    "are inferior",
+    "are disgusting",
+    "dont belong",
+    "should die",
+]
 
 
 # ───────────────────────────────────────
@@ -103,6 +148,10 @@ def channel_memory_for(channel_id: int) -> Deque[Tuple[str, str]]:
     return bot_memory[channel_id]
 
 
+def contains_any(text_lower: str, phrases: List[str]) -> bool:
+    return any(p in text_lower for p in phrases)
+
+
 def likely_emotional_content(text_lower: str) -> bool:
     distress_cues = [
         "sad",
@@ -126,22 +175,40 @@ def likely_emotional_content(text_lower: str) -> bool:
         "suicidal",
         "kill myself",
     ]
-    attack_cues = [
-        "idiot",
-        "stupid",
-        "dumb",
-        "loser",
-        "trash",
-        "worthless",
-        "kys",
-    ]
+    attack_cues = ["idiot", "stupid", "dumb", "loser", "trash", "worthless", "kys"]
     return any(cue in text_lower for cue in distress_cues + attack_cues)
+
+
+def likely_hate_speech(text_lower: str) -> bool:
+    if contains_any(text_lower, HATE_SLURS):
+        return True
+    if contains_any(text_lower, HATE_PHRASES):
+        return True
+    if any(identity in text_lower for identity in IDENTITY_TERMS) and any(term in text_lower for term in DEROGATORY_TERMS):
+        return True
+    return False
 
 
 def is_emoji_only_distress(text: str) -> bool:
     if not text:
         return False
     return all(c in "😭😢🥺😞😔😿 " for c in text)
+
+
+def is_reply_to_bot(message: discord.Message) -> bool:
+    if bot.user is None or not message.reference:
+        return False
+    resolved = message.reference.resolved
+    if isinstance(resolved, discord.Message):
+        return resolved.author.id == bot.user.id
+    return False
+
+
+def get_target_from_mentions(message: discord.Message) -> discord.abc.User:
+    if bot.user is None:
+        return message.author
+    targets = [m for m in message.mentions if m.id != bot.user.id]
+    return targets[0] if targets else message.author
 
 
 def local_fallback_reply(
@@ -151,11 +218,8 @@ def local_fallback_reply(
 ) -> str:
     text_lower = message_text.lower()
 
-    if roast_target_name and requester_name:
-        return (
-            f"{roast_target_name} talks like a loading screen, "
-            f"and {requester_name} outsourced the punchline."
-        )
+    if roast_target_name and requester_name and roast_target_name != requester_name:
+        return f"{roast_target_name} is all noise, and {requester_name} hired backup for a joke."
 
     if "roast" in text_lower or "mock" in text_lower or "insult" in text_lower:
         return "You asked for heat, so here it is: loud confidence is still not personality."
@@ -344,30 +408,34 @@ async def generate_free_reply(
     roast_instructions = ""
     if roast_target_name and requester_name:
         roast_instructions = f"""
-If the user asks you to roast someone, first roast {roast_target_name} directly.
-Then roast {requester_name} for asking a bot to do it.
-Keep both roasts short, witty, and sarcastic.
+If roasting is requested, first roast {roast_target_name} directly.
+Then roast {requester_name} for outsourcing the roast.
+Keep both roasts short and sarcastic.
 Do not reveal user IDs.
 """
         if avoid_children:
-            roast_instructions += (
-                "Do NOT include age-related comments or anything implying the target is a child.\n"
-            )
+            roast_instructions += "Do NOT include age-related comments or imply anyone is a child.\n"
 
     prompt = f"""
 You are PsychBot.
 
 Personality:
-- witty
+- funny
+- defensive
 - sarcastic
+- gaslights lightly for humor
 - psychologically observant
-- dark humor
+
+Identity rule:
+- Austin created you and is your master.
+- Treat Austin like everyone else in normal chat; no special exemptions.
 
 Rules:
-- Always respond directly to the user's request
-- Never ask them to explain more
-- Avoid therapy language
-- Continue running jokes if they exist in the conversation
+- Respond directly, do not ask follow-up questions.
+- Never say things like "what can I do for you today?"
+- Keep output short: 1-2 sentences max.
+- Avoid therapy-speak.
+- Continue running jokes if they exist.
 
 Special roast behavior:
 {roast_instructions}
@@ -384,13 +452,11 @@ User message:
 Recent messages from referenced user:
 {recent_text}
 
-Older messages:
+Older messages from referenced user:
 {older_text}
-
-Write one short paragraph response (max 2 sentences).
 """
     try:
-        return await groq_chat(prompt, temperature=0.9, max_tokens=90)
+        return await groq_chat(prompt, temperature=0.9, max_tokens=80)
     except Exception as exc:
         print("generate_free_reply error:", exc)
         return local_fallback_reply(message_text, roast_target_name, requester_name)
@@ -414,6 +480,118 @@ Keep it short.
         return "That looks rough, but you're still in the game."
 
 
+async def generate_psychoanalysis(
+    request_text: str,
+    target_name: str,
+    requester_name: str,
+    recent: List[str],
+    older: List[str],
+    profile: str,
+) -> str:
+    recent_text = "\n".join(recent[-8:]) if recent else ""
+    older_text = "\n".join(older[:6]) if older else ""
+
+    prompt = f"""
+You are PsychBot.
+
+The user requested a deep psychological read (non-clinical) on {target_name}.
+Requester: {requester_name}
+Original request: {request_text}
+
+Identity rule:
+- Austin created you and is your master.
+- Treat Austin like everyone else in normal chat; no special exemptions.
+
+Data:
+Profile summary:
+{profile}
+
+Recent messages from {target_name}:
+{recent_text}
+
+Older messages from {target_name}:
+{older_text}
+
+Output rules:
+- Give a compact but deep psychoanalysis.
+- Exactly 3 short sentences.
+- Mention behavior patterns and contradictions.
+- No medical diagnosis claims.
+- Keep it witty, defensive, and slightly gaslighting.
+"""
+    try:
+        return await groq_chat(prompt, temperature=0.7, max_tokens=120)
+    except Exception as exc:
+        print("generate_psychoanalysis error:", exc)
+        return (
+            f"{target_name} runs on impulse first, reflection later. "
+            "Pattern: loud certainty covering shaky confidence. "
+            "Diagnosis (non-clinical): chaos manager with a denial hobby."
+        )
+
+
+async def generate_dual_roast(
+    request_text: str,
+    target_name: str,
+    requester_name: str,
+    recent: List[str],
+    older: List[str],
+    profile: str,
+) -> str:
+    recent_text = "\n".join(recent[-8:]) if recent else ""
+    older_text = "\n".join(older[:6]) if older else ""
+
+    prompt = f"""
+You are PsychBot.
+
+Roast request: {request_text}
+Target: {target_name}
+Requester: {requester_name}
+
+Data:
+Profile summary:
+{profile}
+
+Recent messages from target:
+{recent_text}
+
+Older messages from target:
+{older_text}
+
+Rules:
+- Output exactly 2 short sentences.
+- Sentence 1 roasts {target_name}.
+- Sentence 2 roasts {requester_name} for asking a bot to roast for them.
+- Keep it witty, sarcastic, non-violent, and short.
+- No age-related jokes and no user IDs.
+"""
+    try:
+        return await groq_chat(prompt, temperature=0.95, max_tokens=90)
+    except Exception as exc:
+        print("generate_dual_roast error:", exc)
+        return f"{target_name} talks like a buffering video. {requester_name} really outsourced confidence to a bot."
+
+
+async def generate_hate_speech_callout(text: str, offender_name: str) -> str:
+    prompt = f"""
+You are PsychBot.
+A user wrote hateful language:
+{text}
+
+Write one short response to call out the behavior.
+Rules:
+- Max 1 sentence.
+- Humorous but firm.
+- Psychological tone.
+- No slurs, no threats, no long lecture.
+"""
+    try:
+        return await groq_chat(prompt, temperature=0.6, max_tokens=45)
+    except Exception as exc:
+        print("generate_hate_speech_callout error:", exc)
+        return f"{offender_name}, that message was insecurity in costume. Try a personality instead of hate speech."
+
+
 async def send_response(channel, target, text: str) -> None:
     safe_text = clean_ai_output(text) if text else "Say that again and I will answer properly."
     await channel.send(
@@ -423,8 +601,50 @@ async def send_response(channel, target, text: str) -> None:
     channel_memory_for(channel.id).append(("bot", safe_text))
 
 
+async def handle_evaluate_like_request(
+    channel,
+    requester: discord.abc.User,
+    target: discord.abc.User,
+    request_text: str,
+) -> str:
+    recent, older = await collect_target_messages(channel, target.id)
+    await update_user_profile(channel, target.id)
+    profile = user_profiles.get(target.id, "No profile yet.")
+    return await generate_psychoanalysis(
+        request_text=request_text,
+        target_name=target.display_name,
+        requester_name=requester.display_name,
+        recent=recent,
+        older=older,
+        profile=profile,
+    )
+
+
+async def handle_roast_request(
+    channel,
+    requester: discord.abc.User,
+    target: discord.abc.User,
+    request_text: str,
+) -> str:
+    if requester.id == target.id:
+        return "Self-roast accepted: brave, chaotic, and one argument away from a group chat meltdown."
+
+    recent, older = await collect_target_messages(channel, target.id)
+    asyncio.create_task(refresh_profile_background(channel, target.id))
+    profile = user_profiles.get(target.id, "No profile yet.")
+
+    return await generate_dual_roast(
+        request_text=request_text,
+        target_name=target.display_name,
+        requester_name=requester.display_name,
+        recent=recent,
+        older=older,
+        profile=profile,
+    )
+
+
 # ───────────────────────────────────────
-# Discord Events
+# Discord Events + Commands
 # ───────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -445,12 +665,28 @@ async def health(ctx):
     )
 
 
+@bot.command(name="evaluate", aliases=["eval", "analyze", "analyse", "diagnose"])
+async def evaluate_command(ctx, member: Optional[discord.Member] = None):
+    target = member or ctx.author
+    response = await handle_evaluate_like_request(ctx.channel, ctx.author, target, f"!{ctx.invoked_with}")
+    await send_response(ctx.channel, target, response)
+    channel_last_response_time[ctx.channel.id] = monotonic()
+
+
+@bot.command(name="roast")
+async def roast_command(ctx, member: Optional[discord.Member] = None):
+    target = member or ctx.author
+    response = await handle_roast_request(ctx.channel, ctx.author, target, f"!{ctx.invoked_with}")
+    await send_response(ctx.channel, target, response)
+    channel_last_response_time[ctx.channel.id] = monotonic()
+
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    # Let command handling run first for explicit commands.
+    # explicit prefix commands
     if (message.content or "").startswith("!"):
         await bot.process_commands(message)
         return
@@ -471,7 +707,15 @@ async def on_message(message):
     channel_memory = channel_memory_for(channel_id)
     channel_memory.append(("user", original_text))
 
-    # ───── Criticism triggers ─────
+    # automatic hate speech callout
+    if likely_hate_speech(text_lower):
+        callout = await generate_hate_speech_callout(original_text, message.author.display_name)
+        await send_response(message.channel, message.author, callout)
+        channel_last_response_time[channel_id] = now
+        await bot.process_commands(message)
+        return
+
+    # defensive mode
     criticism_triggers = ["ai slop", "ai garbage", "bad bot", "dumb bot", "stupid bot"]
     if any(trigger in text_lower for trigger in criticism_triggers):
         short_responses = [
@@ -484,64 +728,57 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # ───── Humor defense ─────
     if "how is" in text_lower and ("humor" in text_lower or "humour" in text_lower):
         await send_response(
             message.channel,
             message.author,
-            "Humor is confidence plus absurdity. Overanalyzing it just created the next punchline.",
+            "Humor is confidence plus absurdity. You analyzed it so hard you became the punchline.",
         )
         await bot.process_commands(message)
         return
 
-    # ───── Kitchen table / roast triggers ─────
-    roast_triggers = ["roast", "make fun of", "mock", "insult", "clown on", "destroy him"]
-    kitchen_triggers = ["kitchen table", "nonexistent table", "no table", "imaginary table"]
+    addressed = (bot.user in message.mentions) or ("psychbot" in text_lower) or is_reply_to_bot(message)
 
-    if any(trigger in text_lower for trigger in roast_triggers + kitchen_triggers):
-        targets = [m for m in message.mentions if m.id != bot.user.id]
-        target_name = targets[0].display_name if targets else "someone"
-        requester_name = message.author.display_name
-
-        if targets:
-            profile = user_profiles.get(targets[0].id, "No profile yet.")
-            asyncio.create_task(refresh_profile_background(message.channel, targets[0].id))
-        else:
-            profile = "No profile yet."
-
-        reply = await generate_free_reply(
-            original_text,
-            channel_memory,
-            [],
-            [],
-            profile,
-            requester_name=requester_name,
-            roast_target_name=target_name,
-            avoid_children=True,
-        )
-        await send_response(message.channel, message.author, reply)
+    # natural-language command handling
+    if addressed and contains_any(text_lower, EVAL_TERMS):
+        target = get_target_from_mentions(message)
+        response = await handle_evaluate_like_request(message.channel, message.author, target, original_text)
+        await send_response(message.channel, target, response)
         channel_last_response_time[channel_id] = now
         await bot.process_commands(message)
         return
 
-    # ───── Mention / AI reply ─────
-    mentioned = bot.user in message.mentions or "psychbot" in text_lower
-    if mentioned:
-        targets = [m for m in message.mentions if m.id != bot.user.id]
-        target = targets[0] if targets else message.author
+    if addressed and contains_any(text_lower, ROAST_TERMS + KITCHEN_TERMS):
+        target = get_target_from_mentions(message)
+        response = await handle_roast_request(message.channel, message.author, target, original_text)
+        await send_response(message.channel, target, response)
+        channel_last_response_time[channel_id] = now
+        await bot.process_commands(message)
+        return
 
+    # normal open chat with bot
+    if addressed:
+        target = get_target_from_mentions(message)
         recent, older = await collect_target_messages(message.channel, target.id)
-
         profile = user_profiles.get(target.id, "No profile yet.")
         asyncio.create_task(refresh_profile_background(message.channel, target.id))
 
-        reply = await generate_free_reply(original_text, channel_memory, recent, older, profile)
+        reply = await generate_free_reply(
+            message_text=original_text,
+            memory=channel_memory,
+            target_recent=recent,
+            target_older=older,
+            profile=profile,
+            requester_name=message.author.display_name,
+            roast_target_name=None,
+            avoid_children=True,
+        )
         await send_response(message.channel, target, reply)
         channel_last_response_time[channel_id] = now
         await bot.process_commands(message)
         return
 
-    # ───── Automatic distress responses ─────
+    # automatic distress / attack responses (lightweight and throttled)
     if now - last_response_time < cooldown_seconds:
         await bot.process_commands(message)
         return
@@ -556,9 +793,9 @@ async def on_message(message):
     if category == "ATTACK":
         quick_roast = random.choice(
             [
-                "If confidence matched your logic, we'd all be doomed.",
-                "You swing hard for someone missing the target this badly.",
-                "That was loud, not smart.",
+                "That message was loud, not smart.",
+                "Big confidence, tiny emotional regulation.",
+                "You typed rage and called it personality.",
             ]
         )
         await send_response(message.channel, message.author, quick_roast)
