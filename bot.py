@@ -1,24 +1,3 @@
-    channel_memory_for(channel.id).append(("bot", safe_text))
-
-
-# ───────────────────────────────────────
-# Discord Events
-# ───────────────────────────────────────
-@bot.event
-async def on_ready():
-    candidate_list = ", ".join(MODEL_CANDIDATES)
-    print(
-        f"PsychBot online: {bot.user} | version={SCRIPT_VERSION} "
-        f"| model_candidates=[{candidate_list}]"
-    )
-
-
-@bot.command(name="health")
-async def health(ctx):
-    model = active_model or "none-yet"
-    err = last_groq_error if last_groq_error else "none"
-    await ctx.send(
-        f"version={SCRIPT_VERSION} model={model} groq_errors={groq_error_count} last_error={err}",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -170,4 +149,19 @@ async def handle_message(message):
 # Run
 # ───────────────────────────────────────
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN, reconnect=True)
+    try:
+        log.info("Starting PsychBot version=%s", SCRIPT_VERSION)
+        bot.run(DISCORD_TOKEN, reconnect=True, log_handler=None)
+    except discord.PrivilegedIntentsRequired:
+        log.exception(
+            "Discord rejected the bot because a privileged intent is enabled in code "
+            "but disabled in the Discord Developer Portal. Enable MESSAGE CONTENT INTENT "
+            "for the bot, or set DISCORD_MESSAGE_CONTENT_INTENT=false before starting it."
+        )
+        raise
+    except discord.LoginFailure:
+        log.exception("Discord login failed. Check DISCORD_TOKEN.")
+        raise
+    except Exception:
+        log.exception("Fatal startup/runtime crash.")
+        raise
